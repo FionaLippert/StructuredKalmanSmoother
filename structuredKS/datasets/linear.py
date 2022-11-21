@@ -1,14 +1,58 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.distributions.multivariate_normal import MultivariateNormal
 import torch.nn.functional as F
 import numpy as np
 import os
 
 from structuredKS import utils
 
+class LGSSM:
+
+    def __init__(self, initial_mean, initial_precision, transition_model, transition_precision,
+                 observation_model, observation_precision):
+
+        # prior distribution for t=0
+        self.p0 = MultivariateNormal(initial_mean, precision_matrix=initial_precision)
+
+        self.F = transition_model
+        self.Q_inv = transition_precision
+        self.H = observation_model
+        self.R_inv = observation_precision
+
+        self.sample_intial()
+
+    def sample_intial(self):
+        self.state = self.p0.rsample()
+        return self.state
+
+    def sample_transition(self):
+        p = MultivariateNormal(self.F @ self.state, precision_matrix=self.Q_inv)
+        self.state = p.rsample()
+        return self.state
+
+    def sample_observation(self):
+        p = MultivariateNormal(self.H @ self.state, precision_matrix=self.R_inv)
+        return p.rsample()
+
+    def generate_sequence(self, T):
+        states = torch.zeros(T, self.H.shape[1])
+        observations = torch.zeros(T, self.H.shape[0])
+
+        states[0] = self.sample_intial()
+        observations[0] = self.sample_observation()
+
+        for t in range(1, T):
+            states[t] = self.sample_transition()
+            observations[t] = self.sample_observation()
+
+        return states, observations
+
+
+
 class LinearTransport(Dataset):
 
-    def __init__(self, config, task='train', transform=None, load_data_from='', potential_modes=10):
+    def __init__(self, config, task='train', transform=None, load_data_from=''):
 
         # set random seed
         seed = config['seed'] + 1 if task == 'test' else config['seed']
@@ -32,10 +76,17 @@ class LinearTransport(Dataset):
 
         self.dt = config.get('dt', 0.1)
 
-        self.transitions = torch.zeros((self.n_data, self.N, self.N), dtype=torch.float32)
-        self.latent_states = torch.zeros((self.n_data, self.T, self.N), dtype=torch.float32)
+        self.initial_mean = torch.zeros((self.n_data, self.N), dtype=torch.float32)
+        self.initial_precision = torch.zeros((self.n_data, self.N, self.N), dtype=torch.float32)
+        self.transition_model = torch.zeros((self.n_data, self.N, self.N), dtype=torch.float32)
+        self.transition_precision = torch.zeros((self.n_data, self.N, self.N), dtype=torch.float32)
         self.observation_model = torch.zeros((self.n_data, self.M, self.N), dtype=torch.float32)
-        self.observation_noise = torch.zeros((self.n_data, self.M), dtype=torch.float32)
+        self.observation_precision = torch.zeros((self.n_data, self.M, self.M), dtype=torch.float32)
+
+        self.latent_states = torch.zeros((self.n_data, self.T, self.N), dtype=torch.float32)
+        self.observations = torch.zeros((self.n_data, self.T, self.M), dtype=torch.float32)
+
+        self.initial_modes = config.get('initial_modes', 3)
 
 
         if os.path.isdir(load_data_from):
@@ -45,24 +96,40 @@ class LinearTransport(Dataset):
             for i in range(self.n_data):
                 print(f'generate sequence {i}')
 
-                # define observation model
-                self.observation_cov[i] = 0.1 * torch.eye(self.M)
+                # setup LGSSM
+                mean = self.generate_mean() * config.get('initial_scale', 1)
+                self.initial_mean[i] = mean.view(-1)
+                kernel = torch.tensor([[0, 1, 0], [1, 2, 1], [0, 1, 0]]).view(1, 1, 3, 3)
+                L = utils.conv2matrix(kernel, mean.unsqueeze(0).shape) / config.get('initial_noise_level', 1e-5)
+                self.initial_precision[i] = L.T @ L
+
+                self.transition_model[i], _ = self.generate_F()
+                self.transition_precision[i] = torch.eye(self.N) / config.get('transition_noise_level', 1e-5)
+
+                self.observation_precision[i] = torch.eye(self.M) / config.get('observation_noise_level', 1e-5)
                 idx = np.random.choice(range(self.N), self.M)
-                self.observation_model[i] = torch.eye(self.M)[idx]
+                self.observation_model[i] = torch.eye(self.N)[idx]
+
+                lgssm = LGSSM(self.initial_mean[i], self.initial_precision[i],
+                              self.transition_model[i], self.transition_precision[i],
+                              self.observation_model[i], self.observation_precision[i])
+
+                # sample latent states and observations
+                self.latent_states[i], self.observations[i] = lgssm.generate_sequence(self.T)
 
                 # generate latent states
-                self.latent_states[i], self.transitions[i] = self.generate_fields(potential_modes)
+                #self.latent_states[i], self.transitions[i] = self.generate_fields()
 
             # generate observations
-            self.apply_observation_model()
+            #self.apply_observation_model()
 
 
-    def apply_observation_model(self):
-
-        observations = self.observation_model.unsqueeze(1).repeat(1, self.T, 1, 1) @ \
-                            self.latent_states.unsqueeze(-1)
-        noise = torch.randn(self.observations.size()) * self.observation_noise.unsqueeze(1)
-        self.observations = observations + noise
+    # def apply_observation_model(self):
+    #
+    #     observations = self.observation_model.unsqueeze(1).repeat(1, self.T, 1, 1) @ \
+    #                         self.latent_states.unsqueeze(-1)
+    #     noise = torch.randn(self.observations.size()) * self.observation_noise.unsqueeze(1)
+    #     self.observations = observations + noise
 
 
     def generate_F(self):
@@ -72,7 +139,7 @@ class LinearTransport(Dataset):
         cy = self.dt * 2 * self.yspacing
 
         conv_kernel = torch.tensor([[0, cy * vy, 0],
-                                    [cx, 1, -cx * vx],
+                                    [cx * vx, 1, -cx * vx],
                                     [0, -cy * vy, 0]])
 
         conv_kernel = conv_kernel.view(1, 1, 3, 3) # apply with F.conv2d(padded_img, kernel)
@@ -81,27 +148,37 @@ class LinearTransport(Dataset):
 
         return F_matrix, conv_kernel
 
+    def generate_mean(self):
 
-    def generate_fields(self, n_modes):
-        # transport scalar quantity along vector field
+        modes = 0.5 * self.grid_size * torch.rand((self.initial_modes, 2)) + 0.25 * self.grid_size
+        sigmas = torch.rand(self.initial_modes) + 0.1 * self.grid_size
 
-        # setup scalar quantity
-        modes = 6 * (torch.rand((n_modes, 2)) - 0.5)
-        sigmas = torch.rand(n_modes) * 1 + 0.5
-        states = torch.zeros(self.T, self.grid_size, self.grid_size)
-        states[0] = self.generate_potential(modes, sigmas)
+        potentials = torch.zeros(self.xx.shape)
+        for m, s in zip(modes, sigmas):
+            dst = self.coords - m
+            potentials += torch.exp(-((dst * dst).sum(-1) / (s**2))) * (torch.rand(1) + 0.5)
 
-        F_matrix, conv_kernel = self.generate_F()
-        pads = torch.ones(4)
+        return potentials
 
-        for t in range(1, self.T):
-            # update state
-            padded_input = F.pad(torch.ones(states[t-1]), pads)
-            states[t] = F.conv2d(padded_input, conv_kernel)
 
-        # flatten to 1D states
-        states = states.flatten(start_dim=1)
-        return states, F_matrix
+    # def generate_fields(self):
+    #     # transport scalar quantity along vector field
+    #
+    #     # setup scalar quantity
+    #     states = torch.zeros(self.T, self.grid_size, self.grid_size)
+    #     states[0] = self.generate_mean(loc, scale)
+    #
+    #     F_matrix, conv_kernel = self.generate_F()
+    #     pads = torch.ones(4)
+    #
+    #     for t in range(1, self.T):
+    #         # update state
+    #         padded_input = F.pad(torch.ones(states[t-1]), pads)
+    #         states[t] = F.conv2d(padded_input, conv_kernel)
+    #
+    #     # flatten to 1D states
+    #     states = states.flatten(start_dim=1)
+    #     return states, F_matrix
 
 
 
@@ -109,30 +186,42 @@ class LinearTransport(Dataset):
 
         os.makedirs(dir, exist_ok=True)
 
-        torch.save(self.transitions, os.path.join(dir, 'transitions.pt'))
+        torch.save(self.initial_mean, os.path.join(dir, 'initial_mean.pt'))
+        torch.save(self.initial_precision, os.path.join(dir, 'initial_precision.pt'))
+        torch.save(self.transition_model, os.path.join(dir, 'transition_model.pt'))
+        torch.save(self.transition_precision, os.path.join(dir, 'transition_precision.pt'))
         torch.save(self.latent_states, os.path.join(dir, 'latent_states.pt'))
         torch.save(self.observations, os.path.join(dir, 'observations.pt'))
         torch.save(self.observation_model, os.path.join(dir, 'observation_model.pt'))
-        torch.save(self.observation_noise, os.path.join(dir, 'observation_noise.pt'))
+        torch.save(self.observation_precision, os.path.join(dir, 'observation_precision.pt'))
 
     def load(self, dir):
 
         # load existing data
-        transitions = torch.load(os.path.join(dir, 'transitions.pt'))
+        initial_mean = torch.load(os.path.join(dir, 'initial_mean.pt'))
+        initial_precision = torch.load(os.path.join(dir, 'initial_precision.pt'))
+        transition_model = torch.load(os.path.join(dir, 'transition_model.pt'))
+        transition_precision = torch.load(os.path.join(dir, 'transition_precision.pt'))
         latent_states = torch.load(os.path.join(dir, 'latent_states.pt'))
         observations = torch.load(os.path.join(dir, 'observations.pt'))
         observation_model = torch.load(os.path.join(dir, 'observation_model.pt'))
-        observation_noise = torch.load(os.path.join(dir, 'observation_noise.pt'))
+        observation_precision = torch.load(os.path.join(dir, 'observation_precision.pt'))
 
-        assert transitions.shape[0] >= self.n_data
+        assert initial_mean.shape[0] >= self.n_data
+        assert initial_precision.shape[0] >= self.n_data
+        assert transition_model.shape[0] >= self.n_data
+        assert transition_precision.shape[0] >= self.n_data
         assert observation_model.shape[0] >= self.n_data
-        assert observation_noise.shape[0] >= self.n_data
+        assert observation_precision.shape[0] >= self.n_data
         assert torch.all(torch.Tensor(list(latent_states.shape[:2])) >= torch.Tensor([self.n_data, self.T]))
         assert torch.all(torch.Tensor(list(observations.shape[:2])) >= torch.Tensor([self.n_data, self.T]))
 
-        self.transitions = transitions[:self.n_data]
+        self.initial_mean = initial_mean[:self.n_data]
+        self.initial_precision = initial_precision[:self.n_data]
+        self.transition_model = transition_model[:self.n_data]
+        self.transition_precision = transition_precision[:self.n_data]
         self.observation_model = observation_model[:self.n_data]
-        self.observation_noise = observation_noise[:self.n_data]
+        self.observation_precision = observation_precision[:self.n_data]
         self.latent_states = latent_states[:self.n_data, :self.T]
         self.observations = observations[:self.n_data, :self.T]
 
@@ -146,11 +235,14 @@ class LinearTransport(Dataset):
             idx = idx.tolist()
 
         sample = {
-            'transition': self.transitions[idx],
+            'initial_mean': self.initial_mean[idx],
+            'initial_precision': self.initial_precision[idx],
+            'transition_model': self.transition_model[idx],
+            'transition_precision': self.transition_precision[idx],
             'latent_states': self.latent_states[idx],
             'observations': self.observations[idx],
             'observation_model': self.observation_model[idx],
-            'observation_noise': self.observation_noise[idx]
+            'observation_precision': self.observation_precision[idx]
         }
 
         return sample
