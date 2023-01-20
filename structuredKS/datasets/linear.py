@@ -82,6 +82,7 @@ class LinearTransport(Dataset):
         self.transition_precision = torch.zeros((self.n_data, self.N, self.N), dtype=torch.float32)
         self.observation_model = torch.zeros((self.n_data, self.M, self.N), dtype=torch.float32)
         self.observation_precision = torch.zeros((self.n_data, self.M, self.M), dtype=torch.float32)
+        self.v = torch.zeros((self.n_data, 2), dtype=torch.float32)
 
         self.latent_states = torch.zeros((self.n_data, self.T, self.N), dtype=torch.float32)
         self.observations = torch.zeros((self.n_data, self.T, self.M), dtype=torch.float32)
@@ -93,21 +94,22 @@ class LinearTransport(Dataset):
             self.load(load_data_from)
         else:
             # generate data
+            vx, vy = torch.rand(2) - 0.5 # same velocity field for all sequences
             for i in range(self.n_data):
                 print(f'generate sequence {i}')
 
                 # setup LGSSM
                 mean = self.generate_mean() * config.get('initial_scale', 1)
                 self.initial_mean[i] = mean.view(-1)
-                kernel = torch.tensor([[0, 1, 0], [1, 2, 1], [0, 1, 0]]).view(1, 1, 3, 3)
+                kernel = torch.tensor([[0, 0.2, 0], [0.2, 1, 0.2], [0, 0.2, 0]]).view(1, 1, 3, 3)
                 L = utils.conv2matrix(kernel, mean.unsqueeze(0).shape) / config.get('initial_noise_level', 1e-5)
                 self.initial_precision[i] = L.T @ L
 
-                self.transition_model[i], _ = self.generate_F()
+                self.transition_model[i], _, self.v[i] = self.generate_F(vx, vy)
                 self.transition_precision[i] = torch.eye(self.N) / config.get('transition_noise_level', 1e-5)
 
                 self.observation_precision[i] = torch.eye(self.M) / config.get('observation_noise_level', 1e-5)
-                idx = np.random.choice(range(self.N), self.M)
+                idx = np.random.choice(range(self.N), self.M, replace=False)
                 self.observation_model[i] = torch.eye(self.N)[idx]
 
                 lgssm = LGSSM(self.initial_mean[i], self.initial_precision[i],
@@ -132,8 +134,9 @@ class LinearTransport(Dataset):
     #     self.observations = observations + noise
 
 
-    def generate_F(self):
-        vx, vy = torch.rand(2) - 0.5
+    def generate_F(self, vx, vy):
+        # vx, vy = torch.rand(2) - 0.5
+        v = torch.tensor([vx, vy])
 
         cx = self.dt * 2 * self.xspacing
         cy = self.dt * 2 * self.yspacing
@@ -146,7 +149,7 @@ class LinearTransport(Dataset):
 
         F_matrix = utils.conv2matrix(conv_kernel, (1, self.grid_size, self.grid_size))  # apply with F @ flattened_img
 
-        return F_matrix, conv_kernel
+        return F_matrix, conv_kernel, v
 
     def generate_mean(self):
 
@@ -194,6 +197,7 @@ class LinearTransport(Dataset):
         torch.save(self.observations, os.path.join(dir, 'observations.pt'))
         torch.save(self.observation_model, os.path.join(dir, 'observation_model.pt'))
         torch.save(self.observation_precision, os.path.join(dir, 'observation_precision.pt'))
+        torch.save(self.v, os.path.join(dir, 'v.pt'))
 
     def load(self, dir):
 
@@ -206,6 +210,7 @@ class LinearTransport(Dataset):
         observations = torch.load(os.path.join(dir, 'observations.pt'))
         observation_model = torch.load(os.path.join(dir, 'observation_model.pt'))
         observation_precision = torch.load(os.path.join(dir, 'observation_precision.pt'))
+        v = torch.load(os.path.join(dir, 'v.pt'))
 
         assert initial_mean.shape[0] >= self.n_data
         assert initial_precision.shape[0] >= self.n_data
@@ -215,6 +220,7 @@ class LinearTransport(Dataset):
         assert observation_precision.shape[0] >= self.n_data
         assert torch.all(torch.Tensor(list(latent_states.shape[:2])) >= torch.Tensor([self.n_data, self.T]))
         assert torch.all(torch.Tensor(list(observations.shape[:2])) >= torch.Tensor([self.n_data, self.T]))
+        assert v.shape[0] >= self.n_data
 
         self.initial_mean = initial_mean[:self.n_data]
         self.initial_precision = initial_precision[:self.n_data]
@@ -224,6 +230,7 @@ class LinearTransport(Dataset):
         self.observation_precision = observation_precision[:self.n_data]
         self.latent_states = latent_states[:self.n_data, :self.T]
         self.observations = observations[:self.n_data, :self.T]
+        self.v = v[:self.n_data]
 
 
 

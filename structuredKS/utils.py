@@ -34,3 +34,30 @@ def conv2matrix(kernel, img_shape, zero_padding=1):
     M = M[:, mask]
 
     return M
+
+def block2flat(block_matrix):
+
+    """
+    Flatten a block matrix with separate block dimensions
+    :param block_matrix: (..., outer_height, outer_width, block_height, block_width)
+    :return: flat_matrix (..., outer_height * block_height, outer_width * block_width)
+    """
+
+    h, w, bh, bw = block_matrix.shape[-4:]
+
+    return block_matrix.transpose(-3, -2).reshape(-1, h * bh, w * bw)
+
+def flat2block(flat_matrix, block_height, block_width):
+
+    """
+    Separate flat matrix into blocks
+    :param flat_matrix: (..., outer_height * block_height, outer_width * block_width)
+    :return: block_matrix (..., outer_height, outer_width, block_height, block_width)
+    """
+
+    assert flat_matrix.shape[-2] % block_height == 0 and flat_matrix.shape[-1] % block_width == 0
+
+    outer_height = flat_matrix.shape[-2] // block_height
+    outer_width = flat_matrix.shape[-1] // block_width
+
+    return flat_matrix.reshape(-1, outer_height, outer_width, block_height, block_width).transpose(-3, -2)
