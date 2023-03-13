@@ -1,0 +1,149 @@
+{
+    "os": "Linux-5.4.0-137-generic-x86_64-with-glibc2.31",
+    "python": "3.9.16",
+    "heartbeatAt": "2023-02-28T11:43:01.417465",
+    "startedAt": "2023-02-28T11:43:00.908294",
+    "docker": null,
+    "cuda": null,
+    "args": [
+        "--dataset",
+        "spatiotemporal_50x50_T=1_diff=0.01_adv=constant",
+        "--use_bias=0"
+    ],
+    "state": "running",
+    "program": "/home/flipper/StructuredKalmanSmoother/scripts/run_dgmrf.py",
+    "codePath": "scripts/run_dgmrf.py",
+    "git": {
+        "remote": "https://github.com/FionaLippert/StructuredKalmanSmoother.git",
+        "commit": "93a73f4f48311d600cf02efdf875c20028b7994e"
+    },
+    "email": "fiona@lipperta.de",
+    "root": "/home/flipper/StructuredKalmanSmoother",
+    "host": "amlab-gpu1",
+    "username": "flipper",
+    "executable": "/home/flipper/miniconda3/envs/jointKS/bin/python",
+    "cpu_count": 10,
+    "cpu_count_logical": 20,
+    "cpu_freq": {
+        "current": 1.3202,
+        "min": 1200.0,
+        "max": 3400.0
+    },
+    "cpu_freq_per_core": [
+        {
+            "current": 2.284,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.2,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.386,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.201,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.2,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.2,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.586,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.246,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.2,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.234,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.273,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.2,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.376,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.2,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.2,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.2,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.511,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.253,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.2,
+            "min": 1200.0,
+            "max": 3400.0
+        },
+        {
+            "current": 1.254,
+            "min": 1200.0,
+            "max": 3400.0
+        }
+    ],
+    "disk": {
+        "total": 3664.7940368652344,
+        "used": 2654.4014015197754
+    },
+    "gpu": "NVIDIA TITAN X (Pascal)",
+    "gpu_count": 1,
+    "gpu_devices": [
+        {
+            "name": "NVIDIA TITAN X (Pascal)",
+            "memory_total": 12884901888
+        }
+    ],
+    "memory": {
+        "total": 62.68312454223633
+    }
+}

@@ -1,0 +1,112 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    cli_version: 0.13.10
+    framework: torch
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    python_version: 3.9.16
+    start_time: 1677501338.813427
+    t:
+      1:
+      - 1
+      - 55
+      - 77
+      2:
+      - 1
+      - 55
+      - 77
+      3:
+      - 13
+      - 16
+      - 23
+      4: 3.9.16
+      5: 0.13.10
+      8:
+      - 5
+coeff_inv_std:
+  desc: null
+  value: 0.0001
+config:
+  desc: null
+  value: null
+dataset:
+  desc: null
+  value: spatiotemporal_20x20_diff=0.01_adv=constant
+dist_weight:
+  desc: null
+  value: 0
+dump_prediction:
+  desc: null
+  value: 0
+features:
+  desc: null
+  value: 0
+fix_gamma:
+  desc: null
+  value: 0
+gamma_value:
+  desc: null
+  value: 1.0
+inference_rtol:
+  desc: null
+  value: 1.0e-07
+learn_noise_std:
+  desc: null
+  value: 1
+log_det_method:
+  desc: null
+  value: eigvals
+lr:
+  desc: null
+  value: 0.01
+n_iterations:
+  desc: null
+  value: 1000
+n_layers:
+  desc: null
+  value: 1
+n_post_samples:
+  desc: null
+  value: 100
+n_training_samples:
+  desc: null
+  value: 10
+noise_std:
+  desc: null
+  value: 0.01
+non_linear:
+  desc: null
+  value: 0
+optimizer:
+  desc: null
+  value: adam
+plot_post_samples:
+  desc: null
+  value: 3
+plot_vi_samples:
+  desc: null
+  value: 3
+print_params:
+  desc: null
+  value: 0
+save_pdf:
+  desc: null
+  value: 1
+seed:
+  desc: null
+  value: 123
+use_bias:
+  desc: null
+  value: 0
+val_interval:
+  desc: null
+  value: 100
+vi_eval:
+  desc: null
+  value: 0
+vi_layers:
+  desc: null
+  value: 0

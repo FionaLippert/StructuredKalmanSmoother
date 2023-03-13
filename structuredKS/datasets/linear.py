@@ -249,7 +249,8 @@ class LinearTransport(Dataset):
             'latent_states': self.latent_states[idx],
             'observations': self.observations[idx],
             'observation_model': self.observation_model[idx],
-            'observation_precision': self.observation_precision[idx]
+            'observation_precision': self.observation_precision[idx],
+            'idx': idx
         }
 
         return sample
