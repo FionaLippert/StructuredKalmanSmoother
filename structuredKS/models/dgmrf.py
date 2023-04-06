@@ -1,7 +1,12 @@
 import torch
 import torch_geometric as ptg
 import copy
+import numpy as np
+import scipy.stats as sps
 from structuredKS import cg_batch
+import pytorch_lightning as pl
+
+
 
 def new_graph(like_graph, new_x=None):
     graph = copy.copy(like_graph) # Shallow copy
@@ -41,7 +46,7 @@ class DGMRFActivation(torch.nn.Module):
 
 class DGMRFLayer(ptg.nn.MessagePassing):
     def __init__(self, graph, config, vi_layer=False):
-        super(DGMRFLayer, self).__init__(aggr="add")
+        super(DGMRFLayer, self).__init__(aggr="add", node_dim=-1)
 
         self.num_nodes = get_num_nodes(graph)
 
@@ -106,16 +111,22 @@ class DGMRFLayer(ptg.nn.MessagePassing):
         # Second parameter is (alpha2 / alpha1)
         return self.self_weight * torch.tanh(self.alpha2_param)
 
+    # def weight_self_representation(self, x):
+    #     # Representation of same node weighted with degree (taken to power)
+    #     return (x.view(-1, self.num_nodes) * torch.exp(
+    #         self.degree_power * self.log_degrees)).view(-1, 1)
+
     def weight_self_representation(self, x):
         # Representation of same node weighted with degree (taken to power)
-        return (x.view(-1, self.num_nodes) * torch.exp(
-            self.degree_power * self.log_degrees)).view(-1, 1)
+        # x has shape [..., num_nodes]
+        return x * torch.exp(self.degree_power * self.log_degrees)
 
     def forward(self, x, transpose, with_bias):
-        weighted_repr = self.weight_self_representation(x)
+        # x has shape [num_nodes, n_samples]
+        weighted_repr = self.weight_self_representation(x) # shape [..., num_nodes]
 
-        aggr = (self.self_weight * weighted_repr) + (self.neighbor_weight*self.propagate(
-            self.edge_index, x=x, transpose=transpose)) # Shape (n_nodes*n_graphs,1)
+        aggr = (self.self_weight * weighted_repr) + (self.neighbor_weight * self.propagate(
+            self.edge_index, x=x, transpose=transpose)) # Shape [..., num_nodes]
 
         if self.bias and with_bias:
             aggr += self.bias
@@ -133,9 +144,10 @@ class DGMRFLayer(ptg.nn.MessagePassing):
         # if self.dist_weighted:
         #     edge_weights = edge_weights * self.dist_edge_weights
 
-        weighted_messages = x_j.view(-1, edge_weights.shape[0]) * edge_weights
+        # weighted_messages = x_j.view(-1, edge_weights.shape[0]) * edge_weights
+        weighted_messages = x_j * edge_weights
 
-        return weighted_messages.view(-1, 1)
+        return weighted_messages
 
     def log_det(self):
         if self.eigvals_log_det:
@@ -169,7 +181,7 @@ class DGMRF(torch.nn.Module):
 
         self.layers = torch.nn.ModuleList(layer_list)
 
-    def forward(self, x, transpose=False, with_bias=True):
+    def forward(self, x, transpose=False, with_bias=True, **kwargs):
         # x = data.x
 
         if transpose:
@@ -187,63 +199,406 @@ class DGMRF(torch.nn.Module):
         return sum([layer.log_det() for layer in self.layers])
 
 
-class SpatialDGMRF(torch.nn.Module):
-    def __init__(self, graph_0, graph_t, config):
+class JointDGMRF(torch.nn.Module):
+    def __init__(self, graph_list, time_intervals, config, dynamics_graph=None, pos=None):
         super().__init__()
 
-        # define DGMRF for initial precision
-        self.dgmrf_0 = DGMRF(graph_0, config)
+        self.dgmrf_list = torch.nn.ModuleList([DGMRF(g, config) for g in graph_list])
+        self.time_intervals = time_intervals
 
-        # define DGMRF for precision Q_t of dynamics error term
-        self.dgmrf_t = DGMRF(graph_t, config)
+        if not dynamics_graph is None:
+            self.dynamics = TemporalDGMRF(dynamics_graph, config, pos=pos)
 
+    def forward(self, x, transpose=False, with_bias=False, **kwargs):
+        # x has shape [num_samples, T, num_nodes]
+        if hasattr(self, 'dynamics') and not transpose:
+            x = self.dynamics(x, v=kwargs.get('v', None))
 
-    def forward(self, graphs, transpose=False, with_bias=False):
-        # computes z = Pe
+        z = [self.dgmrf_list[i](x[:, ti], transpose, with_bias) for i, ti in enumerate(self.time_intervals)]
+        z = torch.cat(z, dim=1)  # shape [num_samples, T, num_nodes]
 
-        # treat t=0 separately
-        z_0 = self.dgmrf_0(graphs.get_example(0)["latent"].x, transpose, with_bias)
-        # treat all t>0 the same
-        graphs_t = ptg.data.Batch.from_data_list(graphs.index_select(torch.arange(1, graphs.num_graphs)))
-        z_t = self.dgmrf_t(graphs_t["latent"].x, transpose, with_bias)
-
-        z = torch.cat([z_0, z_t], dim=0)
+        if hasattr(self, 'dynamics') and transpose:
+            z = self.dynamics(z, v=kwargs.get('v', None), transpose=True)
 
         return z
 
-    def log_det(self, T):
-        return self.dgmrf_0.log_det() + (T-1) * self.dgmrf_t.log_det()
+    def log_det(self):
+        return sum([len(ti) * self.dgmrf_list[i].log_det() for i, ti in enumerate(self.time_intervals)])
+
+
+class DiffusionModel(ptg.nn.MessagePassing):
+    """
+    Compute x_{t+1} = Fx_t, where F is based on discretized diffusion
+
+    (for now we assume a regular lattice with cell_size = 1x1)
+    """
+
+    def __init__(self, graph, config):
+        super(DiffusionModel, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
+
+        self.diff_param = torch.nn.Parameter(2 * torch.rand(1,) - 1)
+        self.edge_index = graph.edge_index
+        self.edge_index_transpose = self.edge_index.flip(0)
+
+
+    @property
+    def diff_coef(self):
+        # force diffusion coefficient to be positive
+        return torch.exp(self.diff_param)
+
+
+    def forward(self, x, transpose=False, **kwargs):
+
+        agg_i, agg_j = self.propagate(self.edge_index, x=x)
+
+        if transpose:
+            agg_i_T, agg_j_T = self.propagate(self.edge_index_transpose, x=x)
+            update = agg_j_T - agg_i
+        else:
+            update = agg_j - agg_i
+
+        return x + update
+
+    def message(self, x_i, x_j):
+        # construct messages to node i for each edge (j,i)
+
+        # diffusion from self
+        msg_i = self.diff_coef * x_i
+        # diffusion from neighbours
+        msg_j = self.diff_coef * x_j
+
+        # msg = self.diff_coef * (x_j - x_i)
+        return torch.stack([msg_i, msg_j], dim=0)
+
+
+
+class GNNTransition(ptg.nn.MessagePassing):
+    def __init__(self, graph, config, **kwargs):
+        super(GNNTransition, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
+
+        self.edge_index = graph.edge_index
+        self.edge_index_transpose = self.edge_index.flip(0)
+        self.edge_attr = graph.edge_attr
+        self.node_attr = kwargs.get('pos')
+        self.scale = self.node_attr.max()
+
+        self.edge_dim = self.edge_attr.size(-1)
+        self.node_dim = self.node_attr.size(-1)
+
+        # self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim + 2*self.node_dim, 10),
+        #                                     torch.nn.ReLU(),
+        #                                     torch.nn.Linear(10, 1))
+
+        self.v_mlp = torch.nn.Sequential(torch.nn.Linear(self.node_dim, 10),
+                                            torch.nn.ReLU(),
+                                            torch.nn.Linear(10, 2))
+
+    def forward(self, x, transpose=False):
+        # x has shape [num_samples, T, num_nodes]
+        if transpose:
+            edge_index = self.edge_index_transpose
+        else:
+            edge_index = self.edge_index
+        return x + self.propagate(edge_index, x=x, edge_attr=self.edge_attr,
+                                  node_attr=self.node_attr.T.unsqueeze(0) / self.scale, transpose=transpose)
+
+
+    # def message(self, x_i, x_j, edge_attr, node_attr_i, node_attr_j, transpose):
+    #     if transpose:
+    #           inputs = torch.cat([edge_attr, node_attr_j.squeeze(0).T, node_attr_i.squeeze(0).T], dim=-1)
+    #     else:
+    #           inputs = torch.cat([edge_attr, node_attr_i.squeeze(0).T, node_attr_j.squeeze(0).T], dim=-1)
+    #     coeffs = self.edge_mlp(inputs).squeeze(-1)
+    #     msg = coeffs * x_j
+    #     return msg
+
+    def message(self, x_i, x_j, edge_attr, node_attr_i, node_attr_j):
+        v_i = self.v_mlp(node_attr_i.squeeze(0).T)
+        v_j = self.v_mlp(node_attr_j.squeeze(0).T)
+        v = 0.5 * (v_i + v_j)
+        msg = -0.5 * (edge_attr * v).sum(1) * (x_j + x_i)
+        return msg
+
+
+class AdvectionDiffusionModel(ptg.nn.MessagePassing):
+    """
+    Compute x_{t+1} = Fx_t, where F is based on discretized advection
+
+    (for now we assume a regular lattice with cell_size = 1x1)
+    """
+
+    def __init__(self, graph, config):
+        super(AdvectionDiffusionModel, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
+
+        self.velocity = torch.nn.Parameter(2 * torch.rand(2, ) - 1)
+        self.diff_param = torch.nn.Parameter(2 * torch.rand(1, ) - 1)
+        self.edge_index = graph.edge_index
+        self.edge_index_transpose = self.edge_index.flip(0)
+        self.edge_attr = graph.edge_attr # normal vectors at cell boundaries
+
+    @property
+    def diff_coeff(self):
+        # force diffusion coefficient to be positive
+        return torch.exp(self.diff_param)
+
+    def forward(self, x, transpose=False, **kwargs):
+        agg_i, agg_j = self.propagate(self.edge_index, x=x, edge_attr=self.edge_attr)
+
+        if transpose:
+            agg_i_T, agg_j_T = self.propagate(self.edge_index_transpose, x=x, edge_attr=self.edge_attr)
+            update = agg_j_T + agg_i
+        else:
+            update = agg_j + agg_i
+
+        return x + update
+
+    def message(self, x_i, x_j, edge_attr):
+        # construct messages to node i for each edge (j,i)
+        # edge_attr has shape [num_edges, 2]
+        # velocity has shape [2]
+        adv_coef = -0.5 * (edge_attr * self.velocity).sum(1)
+        msg_i = (adv_coef - self.diff_coeff) * x_i
+        msg_j = (adv_coef + self.diff_coeff) * x_j
+        # msg = -0.5 * (edge_attr * self.velocity).sum(1) * (x_j + x_i) + self.diff_coeff * (x_j - x_i)
+        return torch.stack([msg_i, msg_j], dim=0)
+
+class InhomogeneousAdvectionDiffusionModel(ptg.nn.MessagePassing):
+    """
+    Compute x_{t+1} = Fx_t, where F is based on discretized advection and diffusion
+    Advection varies over nodes.
+
+    (for now we assume a regular lattice with cell_size = 1x1)
+    """
+
+    def __init__(self, graph, config):
+        super(InhomogeneousAdvectionDiffusionModel, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
+
+        self.diff_param = torch.nn.Parameter(2 * torch.rand(1, ) - 1)
+        self.edge_index = graph.edge_index
+        self.edge_index_transpose = self.edge_index.flip(0)
+        self.edge_attr = graph.edge_attr  # normal vectors at cell boundaries
+
+    @property
+    def diff_coeff(self):
+        # force diffusion coefficient to be positive
+        return torch.exp(self.diff_param)
+
+    def forward(self, x, transpose=False, **kwargs):
+        if transpose:
+            edge_index = self.edge_index_transpose
+        else:
+            edge_index = self.edge_index
+
+        return x + self.propagate(edge_index, x=x, v=kwargs.get('v'), edge_attr=self.edge_attr)
+
+    def message(self, x_i, x_j, v_i, v_j, edge_attr):
+        # construct messages to node i for each edge (j,i)
+        # edge_attr has shape [num_edges, 2]
+        # x has shape [num_samples, T, num_edges]
+        # velocity has shape [2, num_samples, T, num_edges]
+        velocity = 0.5 * (v_i + v_j).permute(1, 2, 3, 0) # shape [num_samples, T, num_edges, 2]
+        msg = -0.5 * (edge_attr * velocity).sum(-1) * (x_j + x_i) + self.diff_coeff * (x_j - x_i)
+        return msg
+
+class AdvectionModel(ptg.nn.MessagePassing):
+    def __init__(self, graph, config):
+        super(AdvectionModel, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
+
+        self.velocity = torch.nn.Parameter(2 * torch.rand(2, ) - 1)
+        self.edge_index = graph.edge_index
+        self.edge_index_transpose = self.edge_index.flip(0)
+        self.edge_attr = graph.edge_attr # normal vectors at cell boundaries
+
+    def forward(self, x, transpose=False, **kwargs):
+        agg_i, agg_j = self.propagate(self.edge_index, x=x, edge_attr=self.edge_attr)
+
+        if transpose:
+            agg_i_T, agg_j_T = self.propagate(self.edge_index_transpose, x=x, edge_attr=self.edge_attr)
+            update = agg_j_T + agg_i
+        else:
+            update = agg_j + agg_i
+
+        return x + update
+
+
+    def message(self, x_i, x_j, edge_attr):
+        # construct messages to node i for each edge (j,i)
+        # edge_attr has shape [num_edges, 2]
+        # velocity has shape [2]
+        coef = -0.5 * (edge_attr * self.velocity).sum(1)
+        msg_i = coef * x_i
+        msg_j = coef * x_j
+        # msg = -0.5 * (edge_attr * self.velocity).sum(1) * (x_j + x_i)
+        return torch.stack([msg_i, msg_j], dim=0)
+
+
+class TemporalDGMRF(torch.nn.Module):
+    def __init__(self, graph, config, **kwargs):
+        super().__init__()
+        self.transition_type = config.get('transition_type', 'identity')
+        self.n_transitions = config.get('n_transitions', 1)
+
+        # setup transition model
+        if self.transition_type == 'diffusion':
+            self.transition_model = DiffusionModel(graph, config)
+        elif self.transition_type == 'advection':
+            self.transition_model = AdvectionModel(graph, config)
+        elif self.transition_type == 'advection+diffusion':
+            self.transition_model = AdvectionDiffusionModel(graph, config)
+        elif self.transition_type == 'inhomogeneous_advection+diffusion':
+            self.transition_model = InhomogeneousAdvectionDiffusionModel(graph, config)
+        elif self.transition_type == 'GNN':
+            self.transition_model = GNNTransition(graph, config, **kwargs)
+
+    def forward(self, x, transpose=False, **kwargs):
+        # computes e=Fx
+        # x has shape [n_samples, T, num_nodes]
+
+        if transpose:
+            states = x[:, 1:]
+        else:
+            states = x[:, :-1]
+
+        for i in range(self.n_transitions):
+            # TODO: use different parameters for each transition layer?
+            # TODO: if so, order needs to be reversed for transpose model
+            if hasattr(self, 'transition_model'):
+                if self.transition_type == 'inhomogeneous_advection+diffusion':
+                    v = kwargs.get('v').unsqueeze(2).repeat(1, 1, states.size(1), 1)  # shape [2, n_samples, T-1, num_nodes]
+                    states = self.transition_model(states, v=v, transpose=transpose)
+                else:
+                    states = self.transition_model(states, transpose=transpose)
+        # states = torch.cat([torch.zeros_like(x[:, 0]).unsqueeze(1), states], dim=1)
+        if transpose:
+            states = torch.cat([states, torch.zeros_like(x[:, -1]).unsqueeze(1)], dim=1)
+        else:
+            states = torch.cat([torch.zeros_like(x[:, 0]).unsqueeze(1), states], dim=1)
+
+        Fx = x - states
+
+        return Fx
+
+
+# # TODO: write parent class for all jointDGMRFs defined by a dict of DGMRFs and time associated indices
+# class ParallelDGMRF(torch.nn.Module):
+#     def __init__(self, graphs, config):
+#         super().__init__()
+#
+#         self.T = len(graphs)
+#
+#         # define DGMRF for initial precision
+#         self.dgmrf_list = torch.nn.ModuleList([DGMRF(graphs.get_example(i)["latent", "spatial", "latent"], config)
+#                            for i in torch.arange(self.T)])
+#
+#
+#     def forward(self, x, transpose=False, with_bias=False):
+#         # computes z = Px
+#
+#         # x should have shape [T, n_samples, num_nodes]
+#
+#         z = [self.dgmrf_list[i](x[i], transpose, with_bias) for i in torch.arange(self.T)]
+#         z = torch.stack(z, dim=0) # shape [T, n_samples, num_nodes]
+#
+#         return z
+#
+#     def log_det(self):
+#         log_det_list = [dgmrf.log_det() for dgmrf in self.dgmrf_list]
+#         return sum(log_det_list)
+
+class JointVI(torch.nn.Module):
+    def __init__(self, graph_list, time_intervals, initial_guess, config, dynamics_graph=None):
+        super().__init__()
+
+        self.vi_list = torch.nn.ModuleList([VariationalDist(config, g, initial_guess[i])
+                                            for i, g in enumerate(graph_list)])
+        self.time_intervals = time_intervals
+
+        if not dynamics_graph is None:
+            self.dynamics = TemporalDGMRF(dynamics_graph, config)
+
+    def sample(self):
+
+        # TODO: first draw standard sample, push it through F, and then feed it to VI distributions
+        #  integrate dynamics into VariationalDist?
+        # if hasattr(self, 'dynamics'):
+        #     x = self.dynamics(x)
+        #
+        # z = [self.dgmrf_list[i](x[:, ti], transpose, with_bias) for i, ti in enumerate(self.time_intervals)]
+        # z = torch.cat(z, dim=1)  # shape [n_samples, T, num_nodes]
+        #
+        # return z
+
+        return None
+
+    def log_det(self):
+        return sum([len(ti) * self.vi_list[i].log_det() for i, ti in enumerate(self.time_intervals)])
+
+
+class ParallelVI(torch.nn.Module):
+    def __init__(self, graphs, initial_guess, config):
+        super().__init__()
+
+        # define DGMRF for initial precision
+        self.vi_list = torch.nn.ModuleList([VariationalDist(config, graphs.get_example(i)["latent", "spatial", "latent"], initial_guess[i])
+                        for i in torch.arange(len(graphs))])
+
+
+    def sample(self):
+        # computes z = Pe
+
+        x = [vi.sample() for vi in self.vi_list]
+        x = torch.stack(x, dim=1) # shape [n_samples, T, num_nodes]
+
+        return x
+
+    @property
+    def mean_param(self):
+        return torch.cat([vi.mean_param for vi in self.vi_list], dim=0)
+
+    def log_det(self):
+        log_det_list = [vi.log_det() for vi in self.vi_list]
+        return sum(log_det_list)
+
+    @torch.no_grad()
+    def posterior_estimate(self):
+        posteriors = [vi.posterior_estimate() for vi in self.vi_list]
+        post_mean, post_std = list(zip(*posteriors))
+        post_mean = torch.cat(post_mean, dim=0) # shape [T * n_nodes]
+        post_std = torch.cat(post_std, dim=0)  # shape [T * n_nodes]
+        return post_mean, post_std
 
 
 
 class VariationalDist(torch.nn.Module):
-    def __init__(self, config, graph_y):
+    def __init__(self, config, graph, initial_guess):
         super().__init__()
 
         # Dimensionality of distribution (num_nodes of graph)
-        self.dim = graph_y.num_nodes
+        self.dim = get_num_nodes(graph)
 
         # Standard amount of samples (must be fixed to be efficient)
         self.n_samples = config["n_training_samples"]
+        self.n_post_samples = config["n_post_samples"]
+        self.noise_std = config["noise_std"]
+        self.log_noise_std = np.log(config["noise_std"])
 
         # Variational distribution, Initialize with observed y
-        self.mean_param = torch.nn.parameter.Parameter(graph_y.mask*graph_y.x[:,0])
-        self.diag_param = torch.nn.parameter.Parameter(
-                2*torch.rand(self.dim) - 1.) # U(-1,1)
+        self.mean_param = torch.nn.parameter.Parameter(initial_guess)
+        self.diag_param = torch.nn.parameter.Parameter(2*torch.rand(self.dim) - 1.) # U(-1,1)
 
-        self.layers = torch.nn.ModuleList([DGMRFLayer(graph_y, config, vi_layer=True)
+        self.layers = torch.nn.ModuleList([DGMRFLayer(graph, config, vi_layer=True)
                                            for _ in range(config["vi_layers"])])
         if config["vi_layers"] > 0:
             self.post_diag_param = torch.nn.parameter.Parameter(
                 2*torch.rand(self.dim) - 1.)
 
         # Reuse same batch with different x-values
-        self.sample_batch = ptg.data.Batch.from_data_list([new_graph(graph_y)
-                                    for _ in range(self.n_samples)])
+        self.sample_batch = ptg.data.Batch.from_data_list([
+            ptg.data.Data(edge_index=graph.edge_index, num_nodes=self.dim) for _ in range(self.n_samples)])
 
         if config["features"]:
             # Additional variational distribution for linear coefficients
-            n_features = graph_y.features.shape[1]
+            n_features = graph.features.shape[1]
             self.coeff_mean_param = torch.nn.parameter.Parameter(torch.randn(n_features))
             self.coeff_diag_param = torch.nn.parameter.Parameter(
                 2*torch.rand(n_features) - 1.) # U(-1,1)
@@ -266,15 +621,12 @@ class VariationalDist(torch.nn.Module):
 
     def sample(self):
         standard_sample = torch.randn(self.n_samples, self.dim)
-        ind_samples = self.std * standard_sample
+        samples = self.std * standard_sample
 
-        self.sample_batch.x = ind_samples.reshape(-1,1) # Stack all
         for layer in self.layers:
-            propagated = layer(self.sample_batch.x, self.sample_batch.edge_index,
-                    transpose=False, with_bias=False)
-            self.sample_batch.x = propagated
+            propagated = layer(samples, transpose=False, with_bias=False)
+            samples = propagated
 
-        samples = self.sample_batch.x.reshape(self.n_samples, -1)
         if self.layers:
             # Apply post diagonal matrix
             samples  = self.post_diag * samples
@@ -293,9 +645,9 @@ class VariationalDist(torch.nn.Module):
         return total_log_det
 
     def sample_coeff(self, n_samples):
-        standard_sample = torch.randn(n_samples, self.coeff_mean_param.shape[0])
+        standard_sample = torch.randn(self.coeff_mean_param.shape[0], n_samples)
         samples = (self.coeff_std * standard_sample) + self.coeff_mean_param
-        return samples # shape (n_samples, n_features)
+        return samples # shape (n_features, n_samples)
 
     def log_det_coeff(self):
         return 2.0*torch.sum(torch.log(self.coeff_std))
@@ -306,55 +658,251 @@ class VariationalDist(torch.nn.Module):
                 torch.pow(self.coeff_std, 2) + torch.pow(self.coeff_mean_param, 2))
 
     @torch.no_grad()
-    def posterior_estimate(self, graph_y, config):
+    def posterior_estimate(self):
         # Compute mean and marginal std of distribution (posterior estimate)
-        # Mean
-        graph_post_mean = new_graph(graph_y,
-                new_x=self.mean_param.detach().unsqueeze(1))
 
         # Marginal std. (MC estimate)
         mc_sample_list = []
         cur_mc_samples = 0
-        while cur_mc_samples < config["n_post_samples"]:
+        while cur_mc_samples < self.n_post_samples:
             mc_sample_list.append(self.sample())
             cur_mc_samples += self.n_samples
-        mc_samples = torch.cat(mc_sample_list, dim=0)[:config["n_post_samples"]]
+        mc_samples = torch.cat(mc_sample_list, dim=0)[:self.n_post_samples]
 
         # MC estimate of variance using known population mean
         post_var_x = torch.mean(torch.pow(mc_samples - self.mean_param, 2), dim=0)
         # Posterior std.-dev. for y
-        post_std = torch.sqrt(post_var_x + torch.exp(2.*config["log_noise_std"])).unsqueeze(1)
+        post_std = torch.sqrt(post_var_x + self.noise_std**2)
 
-        graph_post_std = new_graph(graph_y, new_x=post_std)
-
-        return graph_post_mean, graph_post_std
+        return self.mean_param.detach(), post_std
 
 class ObservationModel(ptg.nn.MessagePassing):
     """
     Apply observation model to latent states: y = Hx
     """
 
-    def __init__(self):
-        super(ObservationModel, self).__init__(aggr='add', flow="target_to_source")
-
-    def forward(self, x, graph):
+    def __init__(self, graph, num_nodes):
+        super(ObservationModel, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
 
         if hasattr(graph, "edge_weight"):
-            edge_weights = graph.edge_weight.view(-1, 1)
+            self.edge_weights = graph.edge_weight
         else:
-            edge_weights = torch.ones_like(graph.edge_index[0]).view(-1, 1)
-        y = self.propagate(graph.edge_index, x=x, edge_weights=edge_weights)
+            self.edge_weights = torch.ones_like(graph.edge_index[0])
 
-        # apply mask based on incoming edges
-        num_nodes = x.size(0)
-        mask = ptg.utils.degree(graph.edge_index[0], num_nodes=num_nodes).bool()
+        self.edge_index = graph.edge_index
 
-        return y[mask]
+        self.mask = ptg.utils.degree(self.edge_index[0], num_nodes=num_nodes).bool()
+        #self.mask = ptg.utils.degree(self.edge_index[1], num_nodes=num_nodes).bool()
+
+
+    def forward(self, x):
+
+        y = self.propagate(self.edge_index, x=x, edge_weights=self.edge_weights)
+
+        return y[:, self.mask]
 
     def message(self, x_j, edge_weights):
         # construct messages to node i for each edge (j,i)
         msg = edge_weights * x_j
         return msg
+
+
+def crps_score(pred_mean, pred_std, target):
+    # Inputs should be numpy arrays
+    z = (target - pred_mean)/pred_std
+
+    crps = pred_std*((1./np.sqrt(np.pi)) - 2*sps.norm.pdf(z) - z*(2*sps.norm.cdf(z) - 1))
+    return (-1.)*np.mean(crps) # Negative crps, so lower is better
+
+def int_score(pred_mean, pred_std, target, alpha=0.05):
+    lower_std, upper_std = sps.norm.interval(1.-alpha)
+    lower = pred_mean + pred_std*lower_std
+    upper = pred_mean + pred_std*upper_std
+
+    int_score = (upper - lower) + (2/alpha)*(lower-target)*(target < lower) +\
+        (2/alpha)*(target-upper)*(target > upper)
+
+    return np.mean(int_score)
+
+class SpatiotemporalInference(pl.LightningModule):
+
+    def __init__(self, graphs, initial_guess, config):
+        super(SpatiotemporalInference, self).__init__()
+        self.save_hyperparameters()
+
+        # model settings
+        self.learning_rate = config.get('lr', 0.01)
+
+        self.T = len(graphs)
+        self.N = graphs["latent"].num_nodes
+        print(f'N={self.N}, T={self.T}')
+
+        self.y = graphs["data"].x
+        self.pos = graphs.get_example(0)["latent"].pos
+        if hasattr(graphs["latent"], 'x'):
+            self.gt = graphs["latent"].x
+        self.mask = graphs["latent"].mask
+
+        self.noise_std = config["noise_std"]
+        self.log_noise_std = np.log(self.noise_std)
+        self.grid_size = graphs.get_example(0)['latent'].get('grid_size', 1)
+
+        self.use_dynamics = config.get("use_dynamics", False)
+        self.use_hierarchy = config.get("use_hierarchy", False)
+        self.independent_time = config.get("independent_time", False)
+
+        # model components
+        if self.use_dynamics:
+            # use dynamic prior with transition matrix F_t
+            graph_list = [graphs.get_example(0)["latent", "spatial", "latent"],
+                          graphs.get_example(1)["latent", "spatial", "latent"]]
+            time_intervals = [torch.tensor([0]), torch.arange(1, self.T)]
+            dynamics_graph = graphs.get_example(1)["latent", "temporal", "latent"]
+            self.dgmrf = JointDGMRF(graph_list, time_intervals, config, dynamics_graph, pos=self.pos)
+            self.vi_dist = ParallelVI(graphs, initial_guess, config)
+
+            self.input_shape = [self.T, self.N // self.T]
+
+            if self.use_hierarchy:
+                # use DGMRF with shared parameters across time for latent v
+                self.dgmrf_vx = DGMRF(graphs.get_example(0)["latent", "spatial", "latent"], config)
+                self.vi_dist_vx = VariationalDist(config, graphs.get_example(0)["latent", "spatial", "latent"],
+                                                  torch.zeros(self.N // self.T))
+                self.dgmrf_vy = DGMRF(graphs.get_example(0)["latent", "spatial", "latent"], config)
+                self.vi_dist_vy = VariationalDist(config, graphs.get_example(0)["latent", "spatial", "latent"],
+                                                  torch.zeros(self.N // self.T))
+        elif self.independent_time:
+            # treat time steps independently, with separate DGMRF for each time step
+            graph_list = [graphs.get_example(t)["latent", "spatial", "latent"] for t in range(self.T)]
+            time_intervals = [torch.tensor([t]) for t in range(self.T)]
+            self.dgmrf = JointDGMRF(graph_list, time_intervals, config)
+            self.vi_dist = ParallelVI(graphs, initial_guess, config)
+
+            self.input_shape = [self.T, self.N // self.T]
+        else:
+            # use a single DGMRF, with parameters shared across time steps
+            self.dgmrf = DGMRF(graphs["latent", "spatial", "latent"], config)
+            self.vi_dist = VariationalDist(config, graphs["latent", "spatial", "latent"], initial_guess.flatten())
+
+            self.input_shape = [1, self.N]
+
+        # self.obs_model = ObservationModel(graphs["latent", "observation", "data"], self.N)
+        self.obs_model = lambda x: x[:, self.mask]
+
+        self.n_training_samples = config["n_training_samples"]
+
+
+    def get_name(self):
+        return 'SpatiotemporalDGMRF'
+
+    def _reconstruction_loss(self, x, index):
+        # x has shape [n_samples, T * n_nodes]
+        y_hat = self.obs_model(x)
+        residuals = self.y[index] - y_hat[:, index]
+        rec_loss = torch.mean(torch.pow(residuals, 2))
+
+        return rec_loss
+
+    def _joint_log_likelihood(self, x, index, v=None):
+        # x has shape [n_samples, T, n_nodes]
+        # v has shape [2, n_samples, n_nodes]
+
+        # compute log-likelihood of samples given prior p(x)
+        Gx = self.dgmrf(x, v=v)  # shape (n_samples, T, n_nodes)
+        prior_ll = (-0.5 * torch.sum(torch.pow(Gx, 2)) + self.dgmrf.log_det()) / self.N
+
+        ## compute log-likelihood of latent field v
+        if self.use_hierarchy:
+            Gvx = self.dgmrf_vx(v[0]) #.reshape(-1, self.N))
+            Gvy = self.dgmrf_vy(v[1]) #.reshape(-1, self.N))
+            vx_ll = (-0.5 * torch.sum(torch.pow(Gvx, 2)) + self.dgmrf_vx.log_det()) / (self.N // self.T)
+            vy_ll = (-0.5 * torch.sum(torch.pow(Gvy, 2)) + self.dgmrf_vy.log_det()) / (self.N // self.T)
+            prior_ll = prior_ll + vx_ll + vy_ll
+
+        # compute data log-likelihood given samples
+        x = x.reshape(self.n_training_samples, -1)  # shape [n_samples, T * num_nodes]
+        rec_loss = self._reconstruction_loss(x, index)
+        data_ll = -0.5 * rec_loss / (self.noise_std ** 2) - self.log_noise_std
+
+        self.log("train_rec_loss", rec_loss.item(), sync_dist=True)
+
+        return prior_ll + data_ll
+
+
+
+    def training_step(self, training_index):
+        #training_mask = batch['training_mask']
+
+        # sample from variational distribution
+        samples = self.vi_dist.sample()  # shape [n_samples, T, num_nodes]
+
+        # compute entropy of variational distribution
+        vi_entropy = 0.5 * self.vi_dist.log_det() / self.N
+
+        if self.use_hierarchy:
+            v_samples = torch.stack([self.vi_dist_vx.sample(), self.vi_dist_vy.sample()], dim=0).reshape(
+                2, self.n_training_samples, -1) # .reshape(2, self.n_training_samples, self.T, -1)
+            joint_ll = self._joint_log_likelihood(samples, training_index.squeeze(), v=v_samples)
+            vi_entropy = vi_entropy + 0.5 * (self.vi_dist_vx.log_det() + self.vi_dist_vy.log_det()) / (self.N // self.T)
+        else:
+            joint_ll = self._joint_log_likelihood(samples, training_index.squeeze())
+
+        elbo = joint_ll + vi_entropy
+
+        self.log("train_elbo", elbo.item(), sync_dist=True)
+
+        return -elbo
+
+
+    def validation_step(self, val_index, *args):
+
+        samples = self.vi_dist.sample()
+
+        samples = samples.reshape(self.n_training_samples, -1)
+        rec_loss = self._reconstruction_loss(samples, val_index.squeeze())
+
+        self.log("val_rec_loss", rec_loss.item(), sync_dist=True)
+
+        # val_dict = {'vi_mean': self.vi_dist.mean_param.reshape(self.T, self.grid_size, self.grid_size)}
+        # if hasattr(self, 'gt'):
+        #     val_dict['gt'] = self.gt.reshape(self.T, self.grid_size, self.grid_size)
+        #
+        # return val_dict
+
+    def test_step(self, test_index, *args):
+        # posterior inference using variational distribution
+        mean, std = self.vi_dist.posterior_estimate()
+
+        if hasattr(self, 'gt'):
+            # use unobserved nodes to evaluate predictions
+            test_mask = torch.logical_not(self.mask)
+            residuals = self.gt[test_mask] - mean[test_mask]
+
+            pred_mean_np = mean[test_mask].cpu().numpy()
+            pred_std_np = std[test_mask].cpu().numpy()
+            target_np = self.gt[test_mask].cpu().numpy()
+
+            self.log("test_mae", residuals.abs().mean().item(), sync_dist=True)
+            self.log("test_rmse", torch.pow(residuals, 2).mean().sqrt().item(), sync_dist=True)
+            self.log("test_crps", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+            self.log("test_int_score", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+
+        else:
+            # use held out part of data to evaluate predictions
+            y_hat = self.obs_model(mean.unsqueeze(0)).squeeze(0)
+            residuals = self.y[test_index] - y_hat[test_index]
+
+            # TODO: std from posterior_estimate can't be used as is
+            # pred_mean_np = y_hat[test_index].cpu().numpy()
+            # pred_std_np = std[test_index].cpu().numpy()
+            # target_np = self.gt[test_mask].cpu().numpy()
+
+            print('Note to myself: I still need to think about this case.')
+
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        return optimizer
 
 
 def vi_loss(dgmrf, vi_dist, graph_y, config):
@@ -392,81 +940,85 @@ def vi_loss(dgmrf, vi_dist, graph_y, config):
     loss = (-1./graph_y.num_nodes)*elbo
     return loss
 
-def get_bias(dgmrf, graph_y):
-    zero_graph = new_graph(graph_y, new_x=torch.zeros(graph_y.num_nodes, 1))
-    bias = dgmrf(zero_graph)
-    return bias
+
 
 
 # Solve Q_tilde x = rhs using Conjugate Gradient
-def cg_solve(rhs, dgmrf, graph_y, config, rtol, verbose=False):
-    # Only create the graph_batch once, then we can just replace x
-    n_nodes = graph_y.num_nodes
-    x_dummy = torch.zeros(rhs.shape[0],n_nodes,1)
-    graph_list = [new_graph(graph_y, new_x=x_part) for x_part in x_dummy]
-    graph_batch = ptg.data.Batch.from_data_list(graph_list)
+def cg_solve(rhs, dgmrf, mask, T, config, rtol, verbose=False, v=None):
+    # rhs has shape [n_batch, T * n_nodes]
+    # n_nodes = graph_y.num_nodes
+    # x_dummy = torch.zeros(rhs.shape[0],n_nodes,1)
+    # graph_list = [new_graph(graph_y, new_x=x_part) for x_part in x_dummy]
+    # graph_batch = ptg.data.Batch.from_data_list(graph_list)
+
+    n_batch = rhs.size(0)
 
     # CG requires more precision for numerical stability
     rhs = rhs.to(torch.float64)
+    #input_shape = rhs.size()
 
     # Batch linear operator
     def Q_tilde_batched(x):
-        # x has shape (n_batch, n_nodes, 1)
+        # x has shape (n_batch, T * n_nodes, 1)
         # Implicitly applies posterior precision matrix Q_tilde to a vector x
         # y = ((G^T)G + (sigma^-2)(I_m))x
 
         # Modify graph batch
-        graph_batch.x = x.reshape(-1,1)
+        # graph_batch.x = x.reshape(-1,1)
 
-        Gx = dgmrf(graph_batch, with_bias=False)
-        graph_batch.x = Gx
-        GtGx = dgmrf(graph_batch, transpose=True, with_bias=False)
-        #shape (n_batch*n_nodes, 1)
+        Gx = dgmrf(x.reshape(n_batch, T, -1), with_bias=False, v=v)
+        # Gx = dgmrf(x.reshape(n_batch, -1), with_bias=False)
+        GtGx = dgmrf(Gx, transpose=True, with_bias=False, v=v) # has shape [n_batch, T, n_nodes]
 
-        noise_add = (1./torch.exp(2.*config["log_noise_std"])) * graph_y.mask.to(torch.float32)
-        # Shape (n_nodes,)
+        noise_add = mask.to(torch.float32) / (config["noise_std"]**2) # shape [T * n_nodes]
 
-        res = GtGx.view(-1,n_nodes,1) + noise_add.view(1,n_nodes,1)*x
-        # Shape (n_batch, n_nodes,1)
+        # compute Omega^+ @ x (i.e. posterior precision matrix multiplied x)
+        res = GtGx.view(n_batch, x.size(1), 1) + noise_add.view(1, x.size(1), 1) * x # shape [n_batch, T * n_nodes, 1]
+        # res = GtGx.unsqueeze(-1) + noise_add.view(1, -1, 1) * x  # shape [n_batch, T * n_nodes, 1]
+
         return res
 
-    if config["features"]:
-        # Feature matrix with 0-rows for masked nodes
-        masked_features = graph_y.features * graph_y.mask.to(torch.float64).unsqueeze(1)
-        masked_features_cov = masked_features.transpose(0,1)@masked_features
+    # if config["features"]:
+    #     # Feature matrix with 0-rows for masked nodes
+    #     masked_features = graph_y.features * graph_y.mask.to(torch.float64).unsqueeze(1)
+    #     masked_features_cov = masked_features.transpose(0,1)@masked_features
+    #
+    #     noise_precision = 1/torch.exp(2.*config["log_noise_std"])
+    #
+    #     def Q_tilde_batched_with_features(x):
+    #         # x has shape (n_batch, n_nodes+n_features, 1)
+    #         node_x = x[:,:n_nodes]
+    #         coeff_x = x[:,n_nodes:]
+    #
+    #         top_res1 = Q_tilde_batched(node_x)
+    #         top_res2 = noise_precision*masked_features@coeff_x
+    #
+    #         bot_res1 = noise_precision*masked_features.transpose(0,1)@node_x
+    #         bot_res2 = noise_precision*masked_features_cov@coeff_x +\
+    #                 (config["coeff_inv_std"]**2)*coeff_x
+    #
+    #         res = torch.cat((
+    #             top_res1 + top_res2,
+    #             bot_res1 + bot_res2,
+    #             ), dim=1)
+    #
+    #         return res
 
-        noise_precision = 1/torch.exp(2.*config["log_noise_std"])
+        # Q_tilde_func = Q_tilde_batched_with_features
+    # else:
+    Q_tilde_func = Q_tilde_batched
 
-        def Q_tilde_batched_with_features(x):
-            # x has shape (n_batch, n_nodes+n_features, 1)
-            node_x = x[:,:n_nodes]
-            coeff_x = x[:,n_nodes:]
-
-            top_res1 = Q_tilde_batched(node_x)
-            top_res2 = noise_precision*masked_features@coeff_x
-
-            bot_res1 = noise_precision*masked_features.transpose(0,1)@node_x
-            bot_res2 = noise_precision*masked_features_cov@coeff_x +\
-                    (config["coeff_inv_std"]**2)*coeff_x
-
-            res = torch.cat((
-                top_res1 + top_res2,
-                bot_res1 + bot_res2,
-                ), dim=1)
-
-            return res
-
-        Q_tilde_func = Q_tilde_batched_with_features
-    else:
-        Q_tilde_func = Q_tilde_batched
-
-    solution, cg_info = cg_batch.cg_batch(Q_tilde_func, rhs, rtol=rtol)
+    solution, cg_info = cg_batch.cg_batch(Q_tilde_func, rhs.unsqueeze(-1), rtol=rtol, maxiter=100, verbose=True)
 
     if verbose:
         print("CG finished in {} iterations, solution optimal: {}".format(
             cg_info["niter"], cg_info["optimal"]))
 
     return solution.to(torch.float32)
+
+def get_bias(dgmrf, input_shape, v=None):
+    bias = dgmrf(torch.zeros(input_shape), v=v)
+    return bias
 
 @torch.no_grad()
 def sample_posterior(n_samples, dgmrf, graph_y, config, rtol, verbose=False):
@@ -505,6 +1057,19 @@ def sample_posterior(n_samples, dgmrf, graph_y, config, rtol, verbose=False):
             rtol=rtol, verbose=verbose)
 
     return samples
+
+@torch.no_grad()
+def posterior_mean(dgmrf, data, mask, config, v=None):
+    # data has shape [n_batch, T, num_nodes]
+    bias = get_bias(dgmrf, data.size(), v=v)
+    eta = -1. * dgmrf(bias, transpose=True, with_bias=False, v=v) # -G^T @ b
+    masked_y = mask.to(torch.float32).reshape(1, *data.shape[1:]) * data # H^T @ y
+    mean_rhs = eta + masked_y / config["noise_std"]**2 # eta + H^T @ R^{-1} @ y
+
+    post_mean = cg_solve(mean_rhs.reshape(data.size(0), -1), dgmrf, mask, data.size(1), config,
+                         config["inference_rtol"], verbose=True, v=v)[0]
+
+    return post_mean
 
 
 @torch.no_grad()

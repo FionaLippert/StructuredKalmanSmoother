@@ -17,32 +17,41 @@ def compute_posterior(precision, mean, y, H, R_inv):
 def sample_GMRF(G, mean):
     prec = G.transpose(0, 1) @ G
     dist = MultivariateNormal(loc=mean, precision_matrix=prec)
-    x = dist.sample().unsqueeze(1)
+    x = dist.sample()
     return x, prec, dist.covariance_matrix
 
-def assemble_graph_t(latent_states, latent_pos, grid_size, data,
+def assemble_graph_t(latent_states, latent_pos, grid_size, data, mask,
                      spatial_edges, temporal_edges, observation_edges, observation_noise_std, **kwargs):
 
     graph = ptg.data.HeteroData()
 
     # latent node properties
     graph['latent'].x = latent_states
+    graph['latent'].y = data
+    graph['latent'].mask = mask
     graph['latent'].pos = latent_pos
     graph['latent'].grid_size = grid_size
     if 'covariates' in kwargs:
         graph['latent'].covariates = kwargs['covariates']
 
     # data node properties
-    graph['data'].x = data
+    graph['data'].x = data[mask]
     graph['data'].noise_std = observation_noise_std
 
     # spatial graph
     graph['latent', 'spatial', 'latent'].edge_index = spatial_edges
+    graph['latent', 'spatial', 'latent'].num_nodes = latent_states.size(0)
     if 'spatial_edge_attr' in kwargs:
         graph['latent', 'spatial', 'latent'].edge_attr = kwargs['spatial_edge_attr']
 
+    # compute eigenvalues
+    graph['latent', 'spatial', 'latent'].eigvals = compute_eigenvalues(graph["latent", "spatial", "latent"])
+
     # temporal graph
+    print('adding temporal edges')
+    print(temporal_edges)
     graph['latent', 'temporal', 'latent'].edge_index = temporal_edges
+    graph['latent', 'temporal', 'latent'].num_nodes = latent_states.size(0)
     if 'temporal_edge_attr' in kwargs:
         graph['latent', 'temporal', 'latent'].edge_attr = kwargs['temporal_edge_attr']
 
@@ -50,6 +59,7 @@ def assemble_graph_t(latent_states, latent_pos, grid_size, data,
     graph['latent', 'observation', 'data'].edge_index = observation_edges
     if 'observation_weights' in kwargs:
         graph['latent', 'observation', 'data'].edge_weights = kwargs['observation_weights']
+
 
     return graph
 
@@ -69,6 +79,7 @@ def assemble_joint_graph(latent_states, grid_size, T, data,
 
     # joint graph
     graph['latent', 'precision', 'latent'].edge_index = joint_edges
+    graph['latent', 'precision', 'latent'].num_nodes = latent_states.size(0)
     if 'joint_edge_attr' in kwargs:
         graph['latent', 'precision', 'latent'].edge_attr = kwargs['joint_edge_attr']
 
@@ -80,26 +91,38 @@ def assemble_joint_graph(latent_states, grid_size, T, data,
     return graph
 
 
-def assemble_graph_0(latent_states, latent_pos, grid_size, data,
+def assemble_graph_0(latent_states, latent_pos, grid_size, data, mask,
                      spatial_edges, observation_edges, observation_noise_std, **kwargs):
 
     graph = ptg.data.HeteroData()
 
     # latent node properties
     graph['latent'].x = latent_states
+    graph['latent'].y = data
+    graph['latent'].mask = mask
     graph['latent'].pos = latent_pos
     graph['latent'].grid_size = grid_size
     if 'covariates' in kwargs:
         graph['latent'].covariates = kwargs['covariates']
 
     # data node properties
-    graph['data'].x = data
+    graph['data'].x = data[mask]
     graph['data'].noise_std = observation_noise_std
 
     # spatial graph
     graph['latent', 'spatial', 'latent'].edge_index = spatial_edges
+    graph['latent', 'spatial', 'latent'].num_nodes = latent_states.size(0)
     if 'spatial_edge_attr' in kwargs:
         graph['latent', 'spatial', 'latent'].edge_attr = kwargs['spatial_edge_attr']
+
+    # compute eigenvalues
+    graph['latent', 'spatial', 'latent'].eigvals = compute_eigenvalues(graph["latent", "spatial", "latent"])
+
+    # add dummy temporal edges
+    graph['latent', 'temporal', 'latent'].edge_index = torch.tensor([[], []], dtype=torch.int)
+    graph['latent', 'temporal', 'latent'].edge_attr = torch.tensor([])
+    graph['latent', 'temporal', 'latent'].num_nodes = latent_states.size(0)
+
 
     # observation graph
     graph['latent', 'observation', 'data'].edge_index = observation_edges

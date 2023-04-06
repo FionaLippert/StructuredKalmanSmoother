@@ -15,9 +15,7 @@ class StaticTransition(MessagePassing):
         :param indices: row and column indices of non-zero entries of transition matrix F
         :param kwargs: optional key word arguments, such as initial_weights
         """
-        super(StaticTransition, self).__init__(aggr='add', flow="target_to_source", node_dim=1)
-
-        torch.manual_seed(kwargs.get('seed', 1234))
+        super(StaticTransition, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
 
         self.transition_graph = indices
         self.num_edges = self.transition_graph.size(1)

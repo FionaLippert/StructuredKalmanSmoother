@@ -6,6 +6,8 @@ from matplotlib import pyplot as plt
 import os
 from structuredKS import utils
 from time import perf_counter
+import numpy as np
+from torch.distributions.multivariate_normal import MultivariateNormal
 
 def Matrn_G(L, tau, kappa2, gamma):
     G = tau * (kappa2 * torch.eye(L.shape[0]) + L)**gamma
@@ -157,7 +159,7 @@ def get_normal(u, v, max=None):
 
 
 def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.01, obs_ratio=0.8,
-                  transition_noise_std=0.1, seed=0):
+                  transition_noise_std=0.1, seed=0, n_transitions=1):
     # set seed for reproducibility
     torch.manual_seed(seed)
 
@@ -166,77 +168,115 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
     g = nx.DiGraph()
     g = nx.grid_2d_graph(grid_size, grid_size, periodic=True, create_using=g)
     node_pos = torch.tensor(list(g.nodes()))
+    node_dict = dict(zip(list(g.nodes()), range(len(g))))
     normals = torch.stack([get_normal(u, v, max=grid_size - 1) for u, v in g.edges()], dim=0)
 
     # adjacency matrix
     adj = torch.tensor(nx.adjacency_matrix(g).todense())
     edges, _ = ptg.utils.dense_to_sparse(adj)
 
-    # define dynamics
-    F_coeffs = torch.zeros(N, N)
-    identity = True
-    if diffusion:
-        print(f'use diffusion coefficient = {diffusion}')
-        F_coeffs += diffusion_coeffs(adj, diffusion)
-        identity = False
-    if advection == 'constant':
-        velocity = torch.tensor([0., 0.25])
-        print(f'use constant velocity = {velocity}')
-        edge_velocities = {(u, v): (normals[i] * velocity).sum() for i, (u, v) in enumerate(g.edges())}
-        nx.set_edge_attributes(g, edge_velocities, name='velocity')
-        edge_velocities = torch.tensor(nx.adjacency_matrix(g, weight='velocity').todense())
-        F_coeffs += advection_coeffs(edge_velocities)
-        identity = False
-
-    if identity:
-        print(f'use copy operator (identity) as dynamics')
-
-    F = transition_matrix(F_coeffs)
-
     # constructing spatial graphs
     D = torch.diag(adj.sum(0))
     L = D - adj
     P_0 = Matrn_G(L, 1, 0, 1)
     P_t = torch.eye(N) / transition_noise_std
+
+    # only remove self loops if not diagonal??
     transition_edges, _ = ptg.utils.dense_to_sparse(P_t)
+    # transition_edges, _ = ptg.utils.remove_self_loops(ptg.utils.dense_to_sparse(P_t))
+
+    # define dynamics
+    F_coeffs = torch.zeros(N, N)
+    identity = True
+    velocities = torch.zeros(2, len(g))
+    if diffusion:
+        print(f'use diffusion coefficient = {diffusion}')
+        F_coeffs += diffusion_coeffs(adj, diffusion)
+        identity = False
+    if not advection == 'zero':
+        if advection == 'constant':
+            velocities = torch.tensor([-0.3, 0.3]).unsqueeze(1).repeat(1, N)
+        else:
+            P_v = Matrn_G(L, 1000, 0, 1)
+            velocities, _, _ = utils.sample_GMRF(P_v, torch.zeros(2, N))
+            velocities = 0.1 * torch.tensor([[np.sin(2 * np.pi * x / grid_size),
+                                              np.sin(2 * np.pi * y / grid_size)] for x, y in g.nodes()]).T
+            print(velocities.min(), velocities.max())
+            print(velocities)
+        edge_velocities = {(u, v): (normals[i] * 0.5 * (velocities[:, node_dict[u]] + velocities[:, node_dict[v]])).sum()
+                           for i, (u, v) in enumerate(g.edges())}
+        nx.set_edge_attributes(g, edge_velocities, name='velocity')
+        edge_velocities = torch.tensor(nx.adjacency_matrix(g, weight='velocity').todense())
+        F_coeffs += advection_coeffs(edge_velocities)
+        identity = False
+    print(F_coeffs)
+    if identity:
+        print(f'use copy operator (identity) as dynamics')
+
+    F = transition_matrix(F_coeffs)
+    F = torch.linalg.matrix_power(F, n_transitions)
 
     # define joint distribution
     joint_F = construct_joint_F(F.to_sparse(), T)
     joint_Q = construct_joint_G(P_0.to_sparse(), P_t.to_sparse(), T)
     joint_G = (joint_Q @ (sparse_identity(N * T) - joint_F))
+    print(joint_G.to_dense().min())
     mean = torch.zeros(N * T)
 
     # draw samples
-    states, precision_matrix, cov_matrix = utils.sample_GMRF(joint_G.to_dense(), mean)
+    # states, precision_matrix, cov_matrix = utils.sample_GMRF(joint_G.to_dense(), mean)
 
     # generate observations and construct graph for each time step
-    graphs = []
+    spatiotemporal_graphs = []
+    spatial_graphs = []
     y = []
+    data = []
     H = []
+    states = []
+
+    transition_noise_distr = MultivariateNormal(loc=torch.zeros(N), precision_matrix=P_t.transpose(0, 1) @ P_t)
+    initial_noise_distr = MultivariateNormal(loc=torch.zeros(N), precision_matrix=P_0.transpose(0, 1) @ P_0)
     for t in range(T):
-        states_t = states[t*N:(t+1)*N]
+        # states_t = states[t * N:(t + 1) * N]
+        if t == 0:
+            states_t = mean[:N] + initial_noise_distr.sample()
+        else:
+            states_t = F @ states_t + transition_noise_distr.sample()
 
         # generate observations
         data_t, H_t = generate_observations(states_t, obs_noise_std, obs_ratio)
         y_t = mask_observations(data_t, H_t)
+        mask_t = get_mask(H_t)
         observation_edges = H_t.to_sparse().coalesce().indices()
 
-        # construct graph
-        if t == 0:
-            graph_t = utils.assemble_graph_0(states_t, node_pos, grid_size, y_t, edges,
-                                             observation_edges, obs_noise_std)
+        # construct graph with spatial edges
+        spatial_graphs.append(utils.assemble_graph_0(states_t, node_pos, grid_size, data_t, mask_t, edges,
+                                         observation_edges, obs_noise_std))
+        # spatial_graphs[-1]["latent", "spatial", "latent"].eigvals = utils.compute_eigenvalues(
+        #     sp_graph_t["latent", "spatial", "latent"])
+        # spatial_graphs.append(sp_graph_t)
+
+        # construct graph with spatiotemporal edges
+        if t > 0:
+            spatiotemporal_graphs.append(utils.assemble_graph_t(states_t, node_pos, grid_size, data_t, mask_t,
+                            transition_edges, edges, observation_edges, obs_noise_std, temporal_edge_attr=normals))
+            # st_graph_t["latent", "spatial", "latent"].eigvals = utils.compute_eigenvalues(
+            #     st_graph_t["latent", "spatial", "latent"])
+            # spatiotemporal_graphs.append(st_graph_t)
+            # print(sp_graph_t)
+            # print(spatiotemporal_graphs[-1])
         else:
-            graph_t = utils.assemble_graph_t(states_t, node_pos, grid_size, y_t, transition_edges, edges,
-                                             observation_edges, obs_noise_std, temporal_edge_attr=normals)
-
-        graph_t["latent", "spatial", "latent"].eigvals = utils.compute_eigenvalues(graph_t["latent", "spatial", "latent"])
-
-        graphs.append(graph_t)
+            spatiotemporal_graphs.append(spatial_graphs[-1])
         y.append(y_t)
+        data.append(data_t)
         H.append(H_t.to_sparse())
+        states.append(states_t)
 
     y = torch.cat(y, dim=0)
+    data = torch.cat(data, dim=0)
+    states = torch.cat(states, dim=0)
     H = utils.sparse_block_diag(*H)
+    mask = get_mask(H.to_dense())
     R_inv = sparse_identity(H.size(0)) / (obs_noise_std**2)
 
     # compute true posterior
@@ -252,10 +292,27 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
     joint_graph['latent'].prior_mean = mean.unsqueeze(1)
     joint_graph['latent'].true_posterior_mean = posterior_mean
 
-    graphs = ptg.data.Batch.from_data_list(graphs)
+    spatial_graphs = ptg.data.Batch.from_data_list(spatial_graphs)
+    spatiotemporal_graphs = ptg.data.Batch.from_data_list(spatiotemporal_graphs)
+    if not advection == 'zero':
+        spatiotemporal_graphs['latent'].velocities = velocities.T
 
-    return {"graphs": graphs,
-            "joint_graph": joint_graph}
+    # print(spatiotemporal_graphs)
+
+    # joint graph that is compatible with original dgmrf code
+    graph_y = ptg.data.Data(edge_index=spatial_graphs["latent", "spatial", "latent"].edge_index, x=data.unsqueeze(1),
+                            mask=mask, pos=node_pos.repeat(T, 1), T=T, grid_size=grid_size)
+    graph_y.eigvals = utils.compute_eigenvalues(graph_y)
+
+    graph_post_mean = graph_y.clone()
+    graph_post_mean.x = posterior_mean
+
+    return {"spatial_graphs": spatial_graphs,
+            "spatiotemporal_graphs": spatiotemporal_graphs,
+            "joint_graph": joint_graph,
+            "graph_y": graph_y,
+            "graph_post_true_mean": graph_post_mean,
+            "velocities": velocities}
 
 
 def time_func(func, *inputs):
