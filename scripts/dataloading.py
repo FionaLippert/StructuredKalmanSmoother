@@ -23,13 +23,15 @@ parser.add_argument("--obs_noise_std", type=float, default=0.01,
 parser.add_argument("--obs_ratio", type=float, default=0.7,
         help="Fraction of points to observe")
 parser.add_argument("--n_samples", type=int, default=1, help="Number of samples")
-parser.add_argument("--time_steps", type=int, default=5, help="Number of time steps")
-parser.add_argument("--diff", type=float, default=0.0,
+parser.add_argument("--time_steps", type=int, default=6, help="Number of time steps")
+parser.add_argument("--diff", type=float, default=0.01,
         help="Diffusion coefficient")
 parser.add_argument("--advection", type=str, default='constant',
         help="Advection type")
-parser.add_argument("--n_transitions", type=int, default=1,
+parser.add_argument("--n_transitions", type=int, default=4,
         help="number of transitions per time step in the state space model")
+parser.add_argument("--data_split", type=list, default=0.9, help="fraction of data to use for training, "
+                                                                 "the rest is used for validation")
 
 
 
@@ -60,22 +62,55 @@ if T > 1:
 else:
     toydata.plot_spatial(graph_list[0], save_to=raw_data_dir)
 
+#
+# def save_graph_ds(save_dict, args, ds_name):
+#     ds_dir_path = os.path.join(constants.DS_DIR, ds_name)
+#     os.makedirs(ds_dir_path, exist_ok=True)
+#
+#     for name, data in save_dict.items():
+#         fp = os.path.join(ds_dir_path, "{}.pickle".format(name))
+#         with open(fp, "wb") as file:
+#             pickle.dump(data, file)
+#
+#     # Dump cmd-line arguments as json in dataset directory
+#     json_string = json.dumps(vars(args), sort_keys=True, indent=4)
+#     json_path = os.path.join(ds_dir_path, "description.json")
+#     with open(json_path, "w") as json_file:
+#         json_file.write(json_string)
 
-def save_graph_ds(save_dict, args, ds_name):
-    ds_dir_path = os.path.join(constants.DS_DIR, ds_name)
-    os.makedirs(ds_dir_path, exist_ok=True)
+# split data into train and validation set
+joint_mask = data['spatiotemporal_graphs']['latent'].mask
+n_nodes = args.grid_size * args.grid_size
 
-    for name, data in save_dict.items():
-        fp = os.path.join(ds_dir_path, "{}.pickle".format(name))
-        with open(fp, "wb") as file:
-            pickle.dump(data, file)
+nodes = torch.arange(n_nodes).repeat(T)
+data_nodes = nodes[joint_mask]
 
-    # Dump cmd-line arguments as json in dataset directory
-    json_string = json.dumps(vars(args), sort_keys=True, indent=4)
-    json_path = os.path.join(ds_dir_path, "description.json")
-    with open(json_path, "w") as json_file:
-        json_file.write(json_string)
+sensor_nodes = data_nodes.unique()
+M = sensor_nodes.size(0)
+random_idx = torch.randperm(M)
 
+n_train = int(M * args.data_split)
+train_nodes = sensor_nodes[random_idx[:n_train]]
+val_nodes = sensor_nodes[random_idx[n_train:]]
+
+train_idx = torch.isin(data_nodes, train_nodes).nonzero().squeeze()
+print(f'train_idx = {train_idx}')
+
+val_idx = torch.isin(data_nodes, val_nodes).nonzero().squeeze()
+print(f'val_idx = {val_idx}')
+
+# data_idx = torch.randperm(n_nodes)
+# n_train = int(M * args.data_split)
+# train_idx = data_idx[:n_train]
+# val_idx = data_idx[n_train:]
+data['train_idx'] = train_idx
+data['val_idx'] = val_idx
+data['train_nodes'] = train_nodes
+data['val_nodes'] = val_nodes
+
+# use ground truth at unobserved nodes for testing
+test_idx = (joint_mask == 0).nonzero().squeeze()
+data['test_idx'] = test_idx
 
 # save graph
 ds_name = f'spatiotemporal_{args.grid_size}x{args.grid_size}_obs={args.obs_ratio}_' \

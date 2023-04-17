@@ -3,6 +3,12 @@ import torch.nn.functional as F
 from torch.distributions.multivariate_normal import MultivariateNormal
 import scipy.linalg as spl
 import torch_geometric as ptg
+import os
+import numpy as np
+
+def seed_all(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 def compute_posterior(precision, mean, y, H, R_inv):
     if mean.dim() == 1:
@@ -19,6 +25,22 @@ def sample_GMRF(G, mean):
     dist = MultivariateNormal(loc=mean, precision_matrix=prec)
     x = dist.sample()
     return x, prec, dist.covariance_matrix
+
+def get_normal(u, v, max=None):
+    dx = v[0] - u[0]
+    dy = v[1] - u[1]
+
+    # take care of periodic boundaries
+    if abs(dx) == max:
+        dx = -dx
+    if abs(dy) == max:
+        dy = -dy
+
+    normal = torch.tensor([dx, dy])
+    norm = torch.pow(normal, 2).sum().sqrt()
+    normal = normal / norm
+    return normal
+
 
 def assemble_graph_t(latent_states, latent_pos, grid_size, data, mask,
                      spatial_edges, temporal_edges, observation_edges, observation_noise_std, **kwargs):
@@ -62,6 +84,48 @@ def assemble_graph_t(latent_states, latent_pos, grid_size, data, mask,
 
 
     return graph
+
+
+def assemble_graph_slice(pos, data, mask, spatial_edges, temporal_edges=None, **kwargs):
+
+    graph = ptg.data.HeteroData()
+
+    # latent node properties
+    y = torch.zeros(mask.size(), dtype=data.dtype)
+    y[mask] = data
+    graph['latent'].y = y
+    graph['latent'].mask = mask
+    graph['latent'].pos = pos
+    if 'covariates' in kwargs:
+        graph['latent'].covariates = kwargs['covariates']
+
+    # data node properties
+    graph['data'].x = data
+    if 'noise_std' in kwargs:
+        graph['data'].noise_std = kwargs['noise_std']
+
+    # spatial graph
+    graph['latent', 'spatial', 'latent'].edge_index = spatial_edges
+    graph['latent', 'spatial', 'latent'].num_nodes = mask.size(0)
+    if 'spatial_edge_attr' in kwargs:
+        graph['latent', 'spatial', 'latent'].edge_attr = kwargs['spatial_edge_attr']
+
+    # compute eigenvalues
+    graph['latent', 'spatial', 'latent'].eigvals = compute_eigenvalues(graph["latent", "spatial", "latent"])
+
+
+    if temporal_edges is None:
+        # add dummy temporal edges
+        graph['latent', 'temporal', 'latent'].edge_index = torch.tensor([[], []], dtype=torch.int)
+        graph['latent', 'temporal', 'latent'].edge_attr = torch.tensor([])
+        graph['latent', 'temporal', 'latent'].num_nodes = mask.size(0)
+    else:
+        graph['latent', 'temporal', 'latent'].edge_index = temporal_edges
+        graph['latent', 'temporal', 'latent'].num_nodes = mask.size(0)
+        graph['latent', 'temporal', 'latent'].edge_attr = kwargs.get('temporal_edge_attr', torch.tensor([]))
+
+    return graph
+
 
 def assemble_joint_graph(latent_states, grid_size, T, data,
                      joint_edges, observation_edges, observation_noise_std, **kwargs):

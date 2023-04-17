@@ -22,11 +22,11 @@ def get_optimizer(name):
     assert name in OPTIMIZERS, "Unknown optimizer: {}".format(name)
     return OPTIMIZERS[name]
 
-def load_dataset(ds_name, ds_dir=constants.DS_DIR):
+def load_dataset(ds_name, ds_dir=constants.DS_DIR, device='auto'):
     ds_dir_path = os.path.join(ds_dir, ds_name)
 
     # Pickled object might be on other device
-    if torch.cuda.is_available():
+    if not device == 'cpu' and torch.cuda.is_available():
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
@@ -40,8 +40,10 @@ def load_dataset(ds_name, ds_dir=constants.DS_DIR):
                 graph_path = os.path.join(ds_dir_path, filename)
                 with open(graph_path, "rb") as graph_file:
                     graph = pickle.load(graph_file)
-
-                graphs[var_name] = graph.to(device)
+                if isinstance(graph, list) or isinstance(graph, dict):
+                    graphs[var_name] = graph
+                else:
+                    graphs[var_name] = graph.to(device)
 
     return graphs
 
@@ -82,7 +84,8 @@ def noise_std(config):
 
 def save_graph(graph, name, dir_path):
     graph_path = os.path.join(dir_path, "{}.pickle".format(name))
-    graph = graph.to(torch.device("cpu"))
+    if not (isinstance(graph, list) or isinstance(graph, dict)):
+        graph = graph.to(torch.device("cpu"))
     with open(graph_path, "wb") as graph_file:
         pickle.dump(graph, graph_file)
 
@@ -98,6 +101,7 @@ def save_graph_ds(save_dict, args, ds_name):
     json_path = os.path.join(ds_dir_path, "description.json")
     with open(json_path, "w") as json_file:
         json_file.write(json_string)
+    return ds_dir_path
 
 def get_dataset_zooms(ds_name):
     for zoom_name, zoom_list in constants.DATASET_ZOOMS.items():
