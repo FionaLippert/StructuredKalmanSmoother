@@ -32,10 +32,11 @@ print('define config')
 
 config = {"seed": 0,
           # "dataset": "spatiotemporal_5x5_obs=0.7_T=3_diff=0.01_adv=constant_ntrans=4_0",
-          "dataset": "pems_start=20_end=25",
+          "dataset": "pems_start=0_end=215",
           "noise_std": 0.001,
           "n_layers": 1,
           "n_transitions": 1,
+          "diff_K": 1,
           "non_linear": False,
           "fix_gamma": False,
           "log_det_method": "eigvals",
@@ -45,15 +46,16 @@ config = {"seed": 0,
           "vi_layers": 1,
           "features": False,
           "optimizer": "adam",
-          "lr": 0.01,
+          "lr": 0.005,
           "val_interval": 100,
-          "n_iterations": 100,
-          "use_dynamics": False,
-          "independent_time": True,
+          "n_iterations": 10000,
+          "use_dynamics": True,
+          "independent_time": False,
           "use_hierarchy": False,
-          "transition_type": "indep_time",
+          "transition_type": "diffusion",
           "inference_rtol": 1e-7,
-          "device": "cuda"}
+          "device": "gpu",
+          "early_stopping_patience": 2}
 
 
 print('set seed')
@@ -77,16 +79,17 @@ else:
 
 print('setup wandb')
 
+experiment = 'pems_dgmrf_varying_layers'
+
 # Init wandb
-wandb_name = f"{config['dataset']}-{config['transition_type']}-{time.strftime('%H-%M')}"
-wandb.init(project=constants.WANDB_PROJECT, config=config, name=wandb_name)
+wandb_name = f"{config['dataset']}-{config['transition_type']}-diffK={config['diff_K']}-{time.strftime('%H-%M')}"
+# wandb.init(project=constants.WANDB_PROJECT, config=config, name=wandb_name)
+wandb.init(project=experiment, config=config, name=wandb_name)
 
 print('load data')
 
 dataset_dict = utils.load_dataset(config["dataset"], device=device)
 graphs = dataset_dict["spatiotemporal_graphs"]
-print(graphs)
-print(graphs.get_example(0))
 
 M = graphs["data"].num_nodes
 N = graphs["latent"].num_nodes
@@ -94,8 +97,24 @@ T = len(graphs)
 
 print(f'initial guess = {graphs["data"].x.mean()}')
 initial_guess = torch.ones(N).reshape(T, -1) * graphs["data"].x.mean()
-model = SpatiotemporalInference(graphs, initial_guess, config)
+# model = SpatiotemporalInference(graphs, initial_guess, config)
+# spatial_graph = ptg.data.Data(**graphs.get_example(0)["latent", "spatial", "latent"],
+#                               pos=graphs.get_example(0)["latent"].pos)
+# temporal_graph = ptg.data.Data(**graphs.get_example(1)["latent", "temporal", "latent"])
 
+
+if not config['independent_time'] and not config['use_dynamics']:
+    spatial_graph = graphs["latent", "spatial", "latent"]
+    spatial_graph.pos = graphs["latent"].pos
+    temporal_graph = None
+    print(graphs["latent"].mask.sum(), graphs["data"].x.size())
+else:
+    spatial_graph = graphs.get_example(0)["latent", "spatial", "latent"]
+    spatial_graph.pos = graphs.get_example(0)["latent"].pos
+    temporal_graph = graphs.get_example(1)["latent", "temporal", "latent"]
+model = SpatiotemporalInference(config, initial_guess, graphs["data"].x, graphs["latent"].mask,
+                                spatial_graph, temporal_graph, T=T, gt=graphs["latent"].get('x', None),
+                                data_mean=graphs["data"].get('mean', 0), data_std=graphs["data"].get('std', 1))
 # samples = model.vi_dist.sample()
 # print(samples.size())
 # log_det = model.vi_dist.log_det()
@@ -122,15 +141,15 @@ wandb_logger = WandbLogger(log_model='all')
 # log_predictions_callback = LogPredictionsCallback(wandb_logger, t=1)
 # inference_callback = LatticeInferenceCallback(wandb_logger, config)
 
-# tidx = 0
-# G_t = graphs.get_example(tidx)
-# G_t = ptg.data.Data(edge_index=G_t["latent", "spatial", "latent"].edge_index,
-#                     num_nodes=G_t["latent"].num_nodes,
-#                     mask=G_t["latent"].mask,
-#                     pos=G_t["latent"].pos)
-# inference_callback = GraphInferenceCallback(wandb_logger, config, G_t, tidx,
-#                                             dataset_dict['val_nodes'], dataset_dict['train_nodes'])
-earlystopping_callback = EarlyStopping(monitor="val_rec_loss", mode="min", patience=10)
+tidx = 0
+G_t = graphs.get_example(tidx)
+G_t = ptg.data.Data(edge_index=G_t["latent", "spatial", "latent"].edge_index,
+                    num_nodes=G_t["latent"].num_nodes,
+                    mask=G_t["latent"].mask,
+                    pos=G_t["latent"].pos)
+inference_callback = GraphInferenceCallback(wandb_logger, config, G_t, tidx,
+                                            dataset_dict['val_nodes'], dataset_dict['train_nodes'])
+earlystopping_callback = EarlyStopping(monitor="val_rec_loss", mode="min", patience=config["early_stopping_patience"])
 
 
 trainer = pl.Trainer(
@@ -140,7 +159,7 @@ trainer = pl.Trainer(
     deterministic=True,
     accelerator='gpu',
     devices=1,
-    # callbacks=[inference_callback, earlystopping_callback],
+    callbacks=[inference_callback, earlystopping_callback],
 )
 
 trainer.fit(model, dl_train, dl_val)

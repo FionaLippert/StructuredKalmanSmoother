@@ -39,7 +39,10 @@ ptg_graph = ptg.utils.convert.from_networkx(G)
 
 pos = torch.stack([ptg_graph.x, ptg_graph.y], dim=1)
 normals = torch.stack([utils.get_normal(pos[u], pos[v]) for u, v in ptg_graph.edge_index.T], dim=0)
-edge_attr = torch.cat([normals, ptg_graph.weight.unsqueeze(1)], dim=1)
+# edge_attr = torch.cat([normals, ptg_graph.weight.unsqueeze(1)], dim=1)
+# TODO: add other relevant features such as road type, time of the day, intersection vs road segment (i.e. degree), direction of travel
+
+ptg_graph.pos = pos
 
 nodes = torch.arange(ptg_graph.num_nodes)
 spatiotemporal_graphs = []
@@ -58,7 +61,7 @@ for tidx, (ts, df) in enumerate(df_traffic.groupby('Timestamp', sort=True)):
 
         spatiotemporal_graphs.append(utils.assemble_graph_slice(pos, data, mask, ptg_graph.edge_index,
                                     spatial_edge_attr=ptg_graph.weight.unsqueeze(1),
-                                    temporal_edges=ptg_graph.edge_index, temporal_edge_attr=edge_attr))
+                                    temporal_edges=ptg_graph.edge_index, temporal_edge_attr=normals))
 
 # split data into train, val and test set
 joint_mask = torch.cat(joint_mask, dim=0)
@@ -94,18 +97,20 @@ if args.standardize:
     mean, std = data.mean(), data.std()
     data_standardized = (data - mean) / std
     spatiotemporal_graphs["data"].x = data_standardized
-    # spatiotemporal_graphs["data"].mean = mean
-    # spatiotemporal_graphs["data"].std = std
+    spatiotemporal_graphs["data"].mean = mean
+    spatiotemporal_graphs["data"].std = std
 
 
 dataset = {'spatiotemporal_graphs': spatiotemporal_graphs,
+           'spatial_graph': ptg_graph,
+           'temporal_graph': ptg_graph,
            'train_idx': train_idx,
            'val_idx': val_idx,
            'test_idx': test_idx,
            'train_nodes': train_nodes,
            'val_nodes': val_nodes,
            'test_nodes': test_nodes,
-           # 'timestamps': timestamps
+           'timestamps': timestamps
            }
 
 print(dataset)
@@ -116,16 +121,23 @@ print(f'Saving dataset {ds_name}')
 dir = save_graph_ds(dataset, args, ds_name)
 print(dir)
 
-# fig, ax = plt.subplots(figsize=(15, 10))
-# ax_divider = make_axes_locatable(ax)
-# cax = ax_divider.append_axes("right", size="7%", pad="2%")
-# tidx = 0
-# G = spatiotemporal_graphs.get_example(tidx)
-# indices = G["latent"].mask.nonzero().squeeze()
-# pos = G["latent"].pos.numpy()
-# G_t = ptg.data.Data(edge_index=G["latent", "spatial", "latent"].edge_index, num_nodes=G["latent"].num_nodes)
-# plot_nodes(dir, G_t, pos, G["data"].x.numpy(),
-#            indices, ax, cax, fig, filename='test_plot')
+fig, ax = plt.subplots(figsize=(15, 10))
+ax_divider = make_axes_locatable(ax)
+cax = ax_divider.append_axes("right", size="7%", pad="2%")
+tidx = 0
+G = spatiotemporal_graphs.get_example(tidx)
+indices = G["latent"].mask.nonzero().squeeze()
+pos = G["latent"].pos.numpy()
+G_t = ptg.data.Data(edge_index=G["latent", "spatial", "latent"].edge_index, num_nodes=G["latent"].num_nodes)
+plot_nodes(dir, G_t, pos, G["data"].x.numpy(),
+           indices, ax, cax, fig, filename='test_plot')
+
+print(len(indices), len(G["latent"].mask))
+fig, ax = plt.subplots(figsize=(15, 10))
+ax.scatter(pos[indices, 0], pos[indices, 1], alpha=0.2)
+for idx in indices:
+    ax.text(pos[idx, 0], pos[idx, 1], str(idx))
+fig.savefig(osp.join(dir, f'observed_node_labels.png'), dpi=500)
 #
 # T = spatiotemporal_graphs.num_graphs
 # data_indices = spatiotemporal_graphs["latent"].mask.reshape(T, -1)[0].nonzero().squeeze()

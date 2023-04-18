@@ -93,14 +93,14 @@ def assemble_graph_slice(pos, data, mask, spatial_edges, temporal_edges=None, **
     # latent node properties
     y = torch.zeros(mask.size(), dtype=data.dtype)
     y[mask] = data
-    graph['latent'].y = y
-    graph['latent'].mask = mask
-    graph['latent'].pos = pos
+    graph['latent'].y = y.float()
+    graph['latent'].mask = mask.bool()
+    graph['latent'].pos = pos.float()
     if 'covariates' in kwargs:
-        graph['latent'].covariates = kwargs['covariates']
+        graph['latent'].covariates = kwargs['covariates'].float()
 
     # data node properties
-    graph['data'].x = data
+    graph['data'].x = data.float()
     if 'noise_std' in kwargs:
         graph['data'].noise_std = kwargs['noise_std']
 
@@ -108,7 +108,7 @@ def assemble_graph_slice(pos, data, mask, spatial_edges, temporal_edges=None, **
     graph['latent', 'spatial', 'latent'].edge_index = spatial_edges
     graph['latent', 'spatial', 'latent'].num_nodes = mask.size(0)
     if 'spatial_edge_attr' in kwargs:
-        graph['latent', 'spatial', 'latent'].edge_attr = kwargs['spatial_edge_attr']
+        graph['latent', 'spatial', 'latent'].edge_attr = kwargs['spatial_edge_attr'].float()
 
     # compute eigenvalues
     graph['latent', 'spatial', 'latent'].eigvals = compute_eigenvalues(graph["latent", "spatial", "latent"])
@@ -122,7 +122,7 @@ def assemble_graph_slice(pos, data, mask, spatial_edges, temporal_edges=None, **
     else:
         graph['latent', 'temporal', 'latent'].edge_index = temporal_edges
         graph['latent', 'temporal', 'latent'].num_nodes = mask.size(0)
-        graph['latent', 'temporal', 'latent'].edge_attr = kwargs.get('temporal_edge_attr', torch.tensor([]))
+        graph['latent', 'temporal', 'latent'].edge_attr = kwargs.get('temporal_edge_attr', torch.tensor([])).float()
 
     return graph
 
@@ -133,19 +133,19 @@ def assemble_joint_graph(latent_states, grid_size, T, data,
     graph = ptg.data.HeteroData()
 
     # latent node properties
-    graph['latent'].x = latent_states
+    graph['latent'].x = latent_states.float()
     graph['latent'].grid_size = grid_size
     graph['latent'].T = T
 
     # data node properties
-    graph['data'].x = data
+    graph['data'].x = data.float()
     graph['data'].noise_std = observation_noise_std
 
     # joint graph
     graph['latent', 'precision', 'latent'].edge_index = joint_edges
     graph['latent', 'precision', 'latent'].num_nodes = latent_states.size(0)
     if 'joint_edge_attr' in kwargs:
-        graph['latent', 'precision', 'latent'].edge_attr = kwargs['joint_edge_attr']
+        graph['latent', 'precision', 'latent'].edge_attr = kwargs['joint_edge_attr'].float()
 
     # observation graph
     graph['latent', 'observation', 'data'].edge_index = observation_edges
@@ -161,13 +161,13 @@ def assemble_graph_0(latent_states, latent_pos, grid_size, data, mask,
     graph = ptg.data.HeteroData()
 
     # latent node properties
-    graph['latent'].x = latent_states
-    graph['latent'].y = data
-    graph['latent'].mask = mask
-    graph['latent'].pos = latent_pos
+    graph['latent'].x = latent_states.float()
+    graph['latent'].y = data.float()
+    graph['latent'].mask = mask.bool()
+    graph['latent'].pos = latent_pos.float()
     graph['latent'].grid_size = grid_size
     if 'covariates' in kwargs:
-        graph['latent'].covariates = kwargs['covariates']
+        graph['latent'].covariates = kwargs['covariates'].float()
 
     # data node properties
     graph['data'].x = data[mask]
@@ -177,14 +177,14 @@ def assemble_graph_0(latent_states, latent_pos, grid_size, data, mask,
     graph['latent', 'spatial', 'latent'].edge_index = spatial_edges
     graph['latent', 'spatial', 'latent'].num_nodes = latent_states.size(0)
     if 'spatial_edge_attr' in kwargs:
-        graph['latent', 'spatial', 'latent'].edge_attr = kwargs['spatial_edge_attr']
+        graph['latent', 'spatial', 'latent'].edge_attr = kwargs['spatial_edge_attr'].float()
 
     # compute eigenvalues
     graph['latent', 'spatial', 'latent'].eigvals = compute_eigenvalues(graph["latent", "spatial", "latent"])
 
     # add dummy temporal edges
     graph['latent', 'temporal', 'latent'].edge_index = torch.tensor([[], []], dtype=torch.int)
-    graph['latent', 'temporal', 'latent'].edge_attr = torch.tensor([])
+    graph['latent', 'temporal', 'latent'].edge_attr = torch.tensor([], dtype=torch.float32)
     graph['latent', 'temporal', 'latent'].num_nodes = latent_states.size(0)
 
 
