@@ -22,25 +22,40 @@ WEST = -122.10
 DATA_DATETIME = '2022_10_03'
 META_DATETIME = '2022_10_22'
 
+SIMPLIFY = True
+
 def load_roads(dir):
-    if not osp.isfile(osp.join(dir, 'road_graph.pkl')):
+    filename = 'road_graph.pkl' if SIMPLIFY else 'road_graph_raw.pkl'
+    if not osp.isfile(osp.join(dir, filename)):
         cf = '["highway"~"motorway|motorway_link"]'  # road filter, don't use small ones
-        G = osmnx.graph_from_bbox(north=NORTH, south=SOUTH, east=EAST, west=WEST, simplify=True, custom_filter=cf)
-        with open(osp.join(dir, 'road_graph.pkl'), 'wb') as f:  # frequent loading of maps leads to a temporal ban
+        # simplify=True only retaines nodes at junctions and dead ends
+        G = osmnx.graph_from_bbox(north=NORTH, south=SOUTH, east=EAST, west=WEST, simplify=False, custom_filter=cf)
+        with open(osp.join(dir, filename), 'wb') as f:  # frequent loading of maps leads to a temporal ban
             pickle.dump(G, f)
     else:
-        with open(osp.join(dir, 'road_graph.pkl'), 'rb') as f:
+        with open(osp.join(dir, filename), 'rb') as f:
             G = pickle.load(f)
 
     return G
 
 def clean_graph(G):
-    G = osmnx.get_undirected(G)
+    # G = osmnx.get_undirected(G)
     for _ in range(2):
         out_degree = G.degree
         to_remove = [node for node in G.nodes if out_degree[node] == 1]
         G.remove_nodes_from(to_remove)
     G = nx.convert_node_labels_to_integers(G)
+
+    lanes = nx.get_edge_attributes(G, 'lanes')
+
+    # add lane info to motorway_links
+    new_lanes = {(u, v, k): '1' for u, v, k, d in G.edges(keys=True, data=True) if not 'lanes' in d}
+    nx.set_edge_attributes(G, values={**lanes, **new_lanes}, name='lanes')
+
+    # add attributes 'speed_kph' and 'travel_time' to all edges (if speed info is not available it is imputed)
+    G = osmnx.add_edge_speeds(G)
+    G = osmnx.add_edge_travel_times(G)
+
     return G
 
 def load_sensor_info(dir):
@@ -78,14 +93,18 @@ def cut(line, distance):
 Copied and adjusted from https://github.com/spbu-math-cs/Graph-Gaussian-Processes/blob/main/examples/utils/preprocessing.py
 """
 def insert_stations(G, coords, crs=3857):
-    G = osmnx.project_graph(G, to_crs=3857)
+    G = osmnx.project_graph(G, to_crs=crs)
     idx_to_node = {}
     for idx, (lon, lat) in enumerate(coords):
 
         sensor_point = gpd.GeoSeries(Point(lon, lat), crs=4326).to_crs(crs)[0]
         u, v, key = osmnx.distance.nearest_edges(G, sensor_point.x, sensor_point.y)
         edge = G.edges[(u, v, key)]
-        geom = edge["geometry"]
+        # if edge doesn't have geometry create line string: [LineString(coords_u]), LineString(coords_v)]
+        if "geometry" in edge:
+            geom = edge["geometry"]
+        else:
+            geom = LineString([(G.nodes[u]['x'], G.nodes[u]['y']), (G.nodes[v]['x'], G.nodes[v]['y'])])
 
         cut_out = cut(geom, geom.project(sensor_point))
 
@@ -95,9 +114,15 @@ def insert_stations(G, coords, crs=3857):
             l_ratio = geom.project(sensor_point, normalized=True)
             l_1, l_2 = l_ratio * edge['length'], (1 - l_ratio) * edge['length']
             new_vertex = nearest_points(geom, sensor_point)[0]
-            G.add_node(len(G), x=new_vertex.x, y=new_vertex.y)
-            G.add_edge(u, len(G) - 1, length=l_1, geometry=cut_out[0])
-            G.add_edge(len(G) - 1, v, length=l_2, geometry=cut_out[1])
+            G.add_node(len(G), x=new_vertex.x, y=new_vertex.y, street_count=2)
+            # convert length [m] and speed [km/h] to travel time [s]
+            speed_ms = edge['speed_kph'] * 5 / 18
+            travel_time_1 = l_1 / speed_ms
+            travel_time_2 = l_2 / speed_ms
+            G.add_edge(u, len(G) - 1, length=l_1, geometry=cut_out[0], lanes=edge['lanes'],
+                       speed_kph=edge['speed_kph'], travel_time=travel_time_1)
+            G.add_edge(len(G) - 1, v, length=l_2, geometry=cut_out[1], lanes=edge['lanes'],
+                       speed_kph=edge['speed_kph'], travel_time=travel_time_2)
         else:
             # sensor falls onto node u or v
             if (cut_out[0] == 0) and (u not in idx_to_node.values()):
@@ -108,7 +133,7 @@ def insert_stations(G, coords, crs=3857):
                 print(f'ignore sensor idx {idx} with distance {cut_out[0]}')
 
     G = osmnx.project_graph(G, to_crs=4326)
-    G = osmnx.get_undirected(G)
+    # G = osmnx.get_undirected(G)
 
     # Weights are inversely proportional to the length of the road
     lengths = nx.get_edge_attributes(G, 'length')
@@ -119,14 +144,19 @@ def insert_stations(G, coords, crs=3857):
         weights[edge] = mean_length / length
     nx.set_edge_attributes(G, values=weights, name='weight')
 
-    G_nx = nx.MultiGraph(G.edges())
+    G_nx = nx.MultiDiGraph(G.edges())
     nx.set_edge_attributes(G_nx, values=weights, name='weight')
-    nx.set_node_attributes(G_nx, values=nx.get_node_attributes(G, 'x'), name='x')
-    nx.set_node_attributes(G_nx, values=nx.get_node_attributes(G, 'y'), name='y')
+    for edge_attr in ['length', 'lanes', 'speed_kph', 'travel_time']:
+        nx.set_edge_attributes(G_nx, values=nx.get_edge_attributes(G, edge_attr), name=edge_attr)
+    for node_attr in ['x', 'y', 'street_count']:
+        values = nx.get_node_attributes(G, node_attr)
+        print(node_attr, len(values))
+        nx.set_node_attributes(G_nx, values=values, name=node_attr)
 
     # clean up edges
     remove_edges = [(u, v) for u, v, attr in G_nx.edges(data=True) if len(attr) < 1]
     G_nx.remove_edges_from(remove_edges)
+
 
     return G, G_nx, idx_to_node
 
@@ -152,7 +182,7 @@ def load_traffic_data(dir, id_to_idx, hours=range(5, 23), minutes=range(60)):
     return df
 
 def plot_graph(dir, G, vals, vertex_id, normalization, ax, fig, cax, vmin=None, vmax=None, filename=None, bbox=None,
-              nodes_to_label=[], node_size=20, alpha=0.6, edge_linewidth=0.4,
+              nodes_to_label=[], node_size=20, alpha=0.6, edge_linewidth=0.4, label_nodes=False,
               cmap_name='viridis', cut_colormap=False,
               plot_title=None):
     n, s, e, w = bbox  # bounds of crossroads
@@ -181,6 +211,8 @@ def plot_graph(dir, G, vals, vertex_id, normalization, ax, fig, cax, vmin=None, 
 
     osmnx.plot_graph(G, show=False, close=False, bgcolor='w', node_color=colors, node_size=50,
                      edge_color='black', edge_linewidth=edge_linewidth, bbox=bbox, ax=ax)
+    for idx in vertex_id:
+        ax.text(G.nodes[idx]['x'], G.nodes[idx]['y'], str(idx), fontsize=8)
 
     if plot_title is not None:
         ax.set_title(plot_title)
@@ -238,8 +270,12 @@ if __name__ == "__main__":
 
     # mapping from station ID to index
     df_meta = df_meta[df_meta.index.isin(idx_to_node.keys())]
+    df_meta['Index'] = df_meta.index
+    df_meta['Node'] = df_meta.Index.apply(lambda idx: idx_to_node[idx])
     print(f'number of sensors used = {len(df_meta)}')
     id_to_idx = dict(zip(df_meta.ID, df_meta.index))
+    id_to_lanes = dict(zip(df_meta.ID, df_meta.Lanes))
+    id_to_dir = dict(zip(df_meta.ID, df_meta.Dir))
 
     # load traffic data
     df_traffic = load_traffic_data(dir, id_to_idx)
@@ -247,6 +283,8 @@ if __name__ == "__main__":
     # add node info
     df_traffic['Index'] = df_traffic.ID.apply(lambda id: id_to_idx[id])
     df_traffic['Node'] = df_traffic.Index.apply(lambda idx: idx_to_node[idx])
+    df_traffic['Lanes'] = df_traffic.ID.apply(lambda id: id_to_lanes[id])
+    df_traffic['Dir'] = df_traffic.ID.apply(lambda id: id_to_dir[id])
 
     with open(osp.join(dir, 'processed_osmnx_graph.pkl'), 'wb') as f:
         pickle.dump(G, f)
@@ -266,6 +304,8 @@ if __name__ == "__main__":
     fig, ax = plt.subplots(figsize=(10, 10))
     ax_divider = make_axes_locatable(ax)
     cax = ax_divider.append_axes("right", size="7%", pad="2%")
+    lat = nx.get_node_attributes(G, 'lat').values()
+    lat = nx.get_node_attributes(G, 'lat').values()
     plot_graph(dir, G, example_traffic.Speed.values, example_traffic.Node.values, (0, 1), ax, fig, cax,
                plot_title='hour=8', filename='hour=8', bbox=(NORTH, SOUTH, EAST, WEST))
 
@@ -275,4 +315,4 @@ if __name__ == "__main__":
     cax = ax_divider.append_axes("right", size="7%", pad="2%")
     plot_graph(dir, G, example_traffic.Speed.values, example_traffic.Node.values, (0, 1), ax, fig, cax,
                plot_title='crossing at hour=8', filename='crossing_hour=8', bbox=bbox_zoomed, node_size=250,
-                    alpha=0.95, edge_linewidth=2)
+                    alpha=0.95, edge_linewidth=2, label_nodes=True)

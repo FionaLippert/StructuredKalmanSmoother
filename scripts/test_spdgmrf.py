@@ -31,7 +31,8 @@ def seed_all(seed):
 print('define config')
 
 config = {"seed": 0,
-          # "dataset": "spatiotemporal_5x5_obs=0.7_T=3_diff=0.01_adv=constant_ntrans=4_0",
+          # "dataset": "spatiotemporal_20x20_obs=0.7_T=20_diff=0.01_adv=constant_ntrans=4_0",
+          # "dataset": "spatiotemporal_20x20_obs=0.7_T=20_diff=0.0_adv=zero_ntrans=1_0",
           "dataset": "pems_start=0_end=215",
           "noise_std": 0.001,
           "n_layers": 1,
@@ -46,7 +47,7 @@ config = {"seed": 0,
           "vi_layers": 1,
           "features": False,
           "optimizer": "adam",
-          "lr": 0.005,
+          "lr": 0.1,
           "val_interval": 100,
           "n_iterations": 10000,
           "use_dynamics": True,
@@ -55,12 +56,14 @@ config = {"seed": 0,
           "transition_type": "diffusion",
           "inference_rtol": 1e-7,
           "device": "gpu",
-          "early_stopping_patience": 2}
+          "early_stopping_patience": 100}
 
+# experiment = 'constant_advection_07_dgmrf_varying_layers'
+experiment = 'pems100-200_dgmrf_varying_layers'
 
 print('set seed')
 
-seed_all(0)
+seed_all(config['seed'])
 
 print('setup cuda')
 
@@ -79,42 +82,56 @@ else:
 
 print('setup wandb')
 
-experiment = 'pems_dgmrf_varying_layers'
 
 # Init wandb
-wandb_name = f"{config['dataset']}-{config['transition_type']}-diffK={config['diff_K']}-{time.strftime('%H-%M')}"
+wandb_name = f"{config['dataset']}-{config['transition_type']}-diffK={config['diff_K']}-" \
+             f"indepT={config['independent_time']}-layers={config['n_layers']}-bias={config['use_bias']}-{time.strftime('%H-%M')}"
 # wandb.init(project=constants.WANDB_PROJECT, config=config, name=wandb_name)
 wandb.init(project=experiment, config=config, name=wandb_name)
 
 print('load data')
 
 dataset_dict = utils.load_dataset(config["dataset"], device=device)
-graphs = dataset_dict["spatiotemporal_graphs"]
+# graphs = dataset_dict["spatiotemporal_graphs"]
+spatial_graph = dataset_dict["spatial_graph"]
+temporal_graph = dataset_dict["temporal_graph"]
 
-M = graphs["data"].num_nodes
-N = graphs["latent"].num_nodes
-T = len(graphs)
+data = dataset_dict["data"]
+masks = dataset_dict["masks"] # shape [T, num_nodes]
+joint_mask = masks.reshape(-1)
 
-print(f'initial guess = {graphs["data"].x.mean()}')
-initial_guess = torch.ones(N).reshape(T, -1) * graphs["data"].x.mean()
+# M = graphs["data"].num_nodes
+# N = graphs["latent"].num_nodes
+# T = len(graphs)
+M = data.numel()
+N = masks.numel()
+T = masks.size(0)
+
+print(f'initial guess = {data.mean()}')
+initial_guess = torch.ones(N) * data.mean()
+# initial_guess = torch.ones(N).reshape(T, -1) * data.mean()
 # model = SpatiotemporalInference(graphs, initial_guess, config)
 # spatial_graph = ptg.data.Data(**graphs.get_example(0)["latent", "spatial", "latent"],
 #                               pos=graphs.get_example(0)["latent"].pos)
 # temporal_graph = ptg.data.Data(**graphs.get_example(1)["latent", "temporal", "latent"])
 
 
-if not config['independent_time'] and not config['use_dynamics']:
-    spatial_graph = graphs["latent", "spatial", "latent"]
-    spatial_graph.pos = graphs["latent"].pos
-    temporal_graph = None
-    print(graphs["latent"].mask.sum(), graphs["data"].x.size())
-else:
-    spatial_graph = graphs.get_example(0)["latent", "spatial", "latent"]
-    spatial_graph.pos = graphs.get_example(0)["latent"].pos
-    temporal_graph = graphs.get_example(1)["latent", "temporal", "latent"]
-model = SpatiotemporalInference(config, initial_guess, graphs["data"].x, graphs["latent"].mask,
-                                spatial_graph, temporal_graph, T=T, gt=graphs["latent"].get('x', None),
-                                data_mean=graphs["data"].get('mean', 0), data_std=graphs["data"].get('std', 1))
+# if not config['independent_time'] and not config['use_dynamics']:
+#     edges0 = graphs.get_example(0)["latent", "spatial", "latent"].edge_index.size(1)
+#     edges1 = graphs.get_example(1)["latent", "spatial", "latent"].edge_index.size(1)
+#     print(edges0, edges1)
+#     spatial_graph = graphs["latent", "spatial", "latent"]
+#     spatial_graph.pos = graphs["latent"].pos
+#     temporal_graph = None
+#     print(graphs["latent"].mask.sum(), graphs["data"].x.size())
+# else:
+#     spatial_graph = graphs.get_example(0)["latent", "spatial", "latent"]
+#     spatial_graph.pos = graphs.get_example(0)["latent"].pos
+#     temporal_graph = graphs.get_example(1)["latent", "temporal", "latent"]
+
+model = SpatiotemporalInference(config, initial_guess, data, joint_mask,
+                                spatial_graph.to_dict(), temporal_graph.to_dict(), T=T, gt=dataset_dict.get('gt', None),
+                                data_mean=dataset_dict.get('data_mean', 0), data_std=dataset_dict.get('data_std', 1))
 # samples = model.vi_dist.sample()
 # print(samples.size())
 # log_det = model.vi_dist.log_det()
@@ -132,6 +149,8 @@ model = SpatiotemporalInference(config, initial_guess, graphs["data"].x, graphs[
 # dataloaders contain data masks defining which observations to use for training, validation, testing
 ds_train = DummyDataset(dataset_dict['train_idx'], config["val_interval"])
 ds_val = DummyDataset(dataset_dict['val_idx'], 1)
+# ds_train = DummyDataset(torch.arange(M), config["val_interval"])
+# ds_val = DummyDataset(torch.arange(M), 1)
 ds_test = DummyDataset(dataset_dict['test_idx'], 1)
 dl_train = DataLoader(ds_train, batch_size=1, shuffle=False)
 dl_val = DataLoader(ds_val, batch_size=1, shuffle=False)
@@ -139,16 +158,43 @@ dl_test = DataLoader(ds_val, batch_size=1, shuffle=False)
 
 wandb_logger = WandbLogger(log_model='all')
 # log_predictions_callback = LogPredictionsCallback(wandb_logger, t=1)
-# inference_callback = LatticeInferenceCallback(wandb_logger, config)
 
-tidx = 0
-G_t = graphs.get_example(tidx)
-G_t = ptg.data.Data(edge_index=G_t["latent", "spatial", "latent"].edge_index,
-                    num_nodes=G_t["latent"].num_nodes,
-                    mask=G_t["latent"].mask,
-                    pos=G_t["latent"].pos)
-inference_callback = GraphInferenceCallback(wandb_logger, config, G_t, tidx,
-                                            dataset_dict['val_nodes'], dataset_dict['train_nodes'])
+if ("true_posterior_mean" in dataset_dict) and ("gt" in dataset_dict):
+
+    true_mean = dataset_dict["true_posterior_mean"].squeeze()
+    true_std = dataset_dict["true_posterior_std"].squeeze()
+    test_mask = torch.logical_not(joint_mask)
+
+    gt = dataset_dict["gt"]
+    residuals = (gt - true_mean)
+    print(residuals.max(), residuals.min())
+    print(residuals[test_mask].max(), residuals[test_mask].min())
+
+    wandb.run.summary["test_mae_optimal"] = residuals[test_mask].abs().mean().item()
+    wandb.run.summary["test_rmse_optimal"] = torch.pow(residuals[test_mask], 2).mean().sqrt().item()
+    wandb.run.summary["test_mape_optimal"] = (residuals[test_mask] / gt[test_mask]).abs().mean().item()
+
+    inference_callback = LatticeInferenceCallback(wandb_logger, config, dataset_dict['grid_size'],
+                                                  true_mean, true_std, residuals)
+else:
+    tidx = 3
+    # G_t = graphs.get_example(tidx)
+    # G_t = ptg.data.Data(edge_index=G_t["latent", "spatial", "latent"].edge_index,
+    #                     num_nodes=G_t["latent"].num_nodes,
+    #                     mask=G_t["latent"].mask,
+    #                     pos=G_t["latent"].pos)
+
+    val_nodes = dataset_dict['val_nodes']
+    ridx = torch.randperm(len(val_nodes))[:4]
+    val_nodes = val_nodes[ridx].cpu()
+    train_nodes = dataset_dict['train_nodes']
+    ridx = torch.randperm(len(train_nodes))[:4]
+    train_nodes = train_nodes[ridx].cpu()
+    # val_nodes = [892, 893, 785, 784]
+    # train_nodes = [891, 960, 789, 770]
+
+    inference_callback = GraphInferenceCallback(wandb_logger, config, temporal_graph, tidx, val_nodes, train_nodes)
+
 earlystopping_callback = EarlyStopping(monitor="val_rec_loss", mode="min", patience=config["early_stopping_patience"])
 
 
@@ -162,8 +208,33 @@ trainer = pl.Trainer(
     callbacks=[inference_callback, earlystopping_callback],
 )
 
+def print_params(model, config, header=None):
+    if header:
+        print(header)
+
+    print("Raw parameters:")
+    for param_name, param_value in model.state_dict().items():
+        print("{}: {}".format(param_name, param_value))
+
+    print("Aggregation weights:")
+    for layer_i, layer in enumerate(model.layers):
+        print("Layer {}".format(layer_i))
+        if hasattr(layer, "activation_weight"):
+            print("non-linear weight: {:.4}".format(layer.activation_weight.item()))
+        else:
+            print("self: {:.4}, neighbor: {:.4}".format(
+                layer.self_weight[0].item(), layer.neighbor_weight[0].item()))
+
+        if hasattr(layer, "degree_power"):
+            print("degree power: {:.4}".format(layer.degree_power[0].item()))
+
 trainer.fit(model, dl_train, dl_val)
+# print_params(model.dgmrf, config)
+for param_name, param_value in model.dgmrf.state_dict().items():
+    print("{}: {}".format(param_name, param_value))
 trainer.test(model, dl_test)
+
+
 
 # if hasattr(model.dgmrf, 'dynamics'):
 #     if hasattr(model.dgmrf.dynamics.transition_model, 'diff_coeff'):

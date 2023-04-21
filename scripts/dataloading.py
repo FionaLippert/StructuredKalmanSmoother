@@ -48,14 +48,13 @@ data = toydata.generate_data(args.grid_size, T, diffusion=args.diff, advection=a
                              obs_noise_std=args.obs_noise_std, obs_ratio=args.obs_ratio, seed=args.seed,
                              n_transitions=args.n_transitions)
 
-fig, ax = plt.subplots(1, 2, figsize=(8, 4))
-v = data['velocities'].reshape(2, args.grid_size, args.grid_size)
-img = ax[0].imshow(v[0])
-img = ax[1].imshow(v[1])
-ax[0].axis('off')
-ax[1].axis('off')
-
-fig.savefig(os.path.join(raw_data_dir, f'velocities.png'), bbox_inches='tight')
+# fig, ax = plt.subplots(1, 2, figsize=(8, 4))
+# v = data['velocities'].reshape(2, args.grid_size, args.grid_size)
+# img = ax[0].imshow(v[0])
+# img = ax[1].imshow(v[1])
+# ax[0].axis('off')
+# ax[1].axis('off')
+# fig.savefig(os.path.join(raw_data_dir, f'velocities.png'), bbox_inches='tight')
 
 # plotting
 graph_list = data["spatiotemporal_graphs"].to_data_list()
@@ -95,10 +94,15 @@ n_train = int(M * args.data_split)
 train_nodes = sensor_nodes[random_idx[:n_train]]
 val_nodes = sensor_nodes[random_idx[n_train:]]
 
-train_idx = torch.isin(data_nodes, train_nodes).nonzero().squeeze()
+# TODO: change this back!
+random_idx = torch.randperm(joint_mask.sum())
+
+# train_idx = torch.isin(data_nodes, train_nodes).nonzero().squeeze()
+train_idx = random_idx[:int(joint_mask.sum() * args.data_split)]
 print(f'train_idx = {train_idx}')
 
-val_idx = torch.isin(data_nodes, val_nodes).nonzero().squeeze()
+# val_idx = torch.isin(data_nodes, val_nodes).nonzero().squeeze()
+val_idx = random_idx[int(joint_mask.sum() * args.data_split):]
 print(f'val_idx = {val_idx}')
 
 # data_idx = torch.randperm(n_nodes)
@@ -113,6 +117,8 @@ data['val_nodes'] = val_nodes
 # use ground truth at unobserved nodes for testing
 test_idx = (joint_mask == 0).nonzero().squeeze()
 data['test_idx'] = test_idx
+
+data['grid_size'] = torch.tensor([args.grid_size, args.grid_size])
 
 # save graph
 ds_name = f'spatiotemporal_{args.grid_size}x{args.grid_size}_obs={args.obs_ratio}_' \

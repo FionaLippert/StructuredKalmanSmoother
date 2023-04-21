@@ -21,9 +21,15 @@ class LogPredictionsCallback(Callback):
 
 class LatticeInferenceCallback(Callback):
 
-    def __init__(self, logger, config):
+    def __init__(self, logger, config, grid_size, true_post_mean, true_post_std, true_residuals):#, val_idx, train_idx):
         self.logger = logger
         self.config = config
+        self.grid_size = grid_size
+        self.true_post_mean = true_post_mean
+        self.true_post_std = true_post_std
+        self.true_residuals = true_residuals
+        # self.val_idx = val_idx
+        # self.train_idx = train_idx
 
     def masked_image(self, img, mask):
         return wandb.Image(img.cpu().detach().numpy(),
@@ -32,8 +38,7 @@ class LatticeInferenceCallback(Callback):
 
     def on_train_start(self, trainer, pl_module):
         if hasattr(pl_module, 'gt'):
-            grid_size = int(np.sqrt(pl_module.num_nodes))
-            img_shape = (pl_module.T, grid_size, grid_size)
+            img_shape = (pl_module.T, *self.grid_size)
             gt = pl_module.gt.reshape(img_shape)
             masks = pl_module.mask.reshape(img_shape)
             # self.logger.log_image(key='gt', images=[self.masked_image(gt[t], masks[t]) for t in range(pl_module.T)])
@@ -42,8 +47,7 @@ class LatticeInferenceCallback(Callback):
 
     def on_train_epoch_start(self, trainer, pl_module):
         # plot current vi mean and std
-        grid_size = int(np.sqrt(pl_module.num_nodes))
-        img_shape = (pl_module.T, grid_size, grid_size)
+        img_shape = (pl_module.T, *self.grid_size)
         mean, std = pl_module.vi_dist.posterior_estimate()
         mean = mean.reshape(img_shape)
         std = std.reshape(img_shape)
@@ -52,15 +56,14 @@ class LatticeInferenceCallback(Callback):
         self.logger.log_image(key='vi_std', images=[img for img in std])
 
         if hasattr(pl_module, 'vi_dist_vx'):
-            mean_vx = pl_module.vi_dist_vx.posterior_estimate()[0].reshape(grid_size, grid_size)
-            mean_vy = pl_module.vi_dist_vy.posterior_estimate()[0].reshape(grid_size, grid_size)
+            mean_vx = pl_module.vi_dist_vx.posterior_estimate()[0].reshape(*self.grid_size)
+            mean_vy = pl_module.vi_dist_vy.posterior_estimate()[0].reshape(*self.grid_size)
 
             self.logger.log_image(key='vi_v_mean', images=[mean_vx, mean_vy])
 
     def on_train_end(self, trainer, pl_module):
         if hasattr(pl_module, 'gt'):
-            grid_size = int(np.sqrt(pl_module.num_nodes))
-            img_shape = (pl_module.T, grid_size, grid_size)
+            img_shape = (pl_module.T, *self.grid_size)
             gt = pl_module.gt.reshape(img_shape).cpu().detach()
 
             # VI inference
@@ -68,22 +71,27 @@ class LatticeInferenceCallback(Callback):
             mean = mean.reshape(img_shape).cpu().detach()
             std = std.reshape(img_shape).cpu().detach()
 
-            # CG inference
-            if self.config['use_hierarchy']:
-                v_mean = torch.stack([pl_module.vi_dist_vx.mean_param, pl_module.vi_dist_vy.mean_param], dim=0).unsqueeze(1)
-                print(v_mean.size())
-            else:
-                v_mean = None
-            data = torch.zeros(pl_module.mask.size())
-            data[pl_module.mask] = pl_module.y
-            true_mean = posterior_mean(pl_module.dgmrf, data.reshape(1, *pl_module.input_shape),
-                                       pl_module.mask, self.config, v=v_mean).reshape(img_shape).cpu().detach()
+            true_mean = self.true_post_mean.reshape(img_shape).cpu().detach()
+            true_residuals = self.true_residuals.reshape(img_shape).cpu().detach()
+            # true_std = self.true_post_std.reshape(img_shape).cpu().detach()
+
+            # # CG inference
+            # if self.config['use_hierarchy']:
+            #     v_mean = torch.stack([pl_module.vi_dist_vx.mean_param, pl_module.vi_dist_vy.mean_param], dim=0).unsqueeze(1)
+            #     print(v_mean.size())
+            # else:
+            #     v_mean = None
+            # data = torch.zeros(pl_module.mask.size())
+            # data[pl_module.mask] = pl_module.y
+            # true_mean = posterior_mean(pl_module.dgmrf, data.reshape(1, *pl_module.input_shape),
+            #                            pl_module.mask, self.config, v=v_mean).reshape(img_shape).cpu().detach()
 
             data = torch.ones_like(pl_module.mask) * np.nan
             data[pl_module.mask] = pl_module.y
             data = data.reshape(img_shape).cpu().detach()
 
             residuals = gt - mean
+            # residuals_optimal = gt - true_mean
 
             vmin = gt.min()
             vmax = gt.max()
@@ -106,6 +114,9 @@ class LatticeInferenceCallback(Callback):
                 # VI posterior mean
                 ax[3, t].imshow(mean[t], vmin=vmin, vmax=vmax)
                 ax[3, 0].set_ylabel('VI mean', fontsize=30)
+                # res_img_opt = ax[3, t].imshow(true_residuals[t], vmin=-true_residuals.abs().max(), vmax=true_residuals.abs().max(),
+                #                           cmap='coolwarm')
+                # ax[3, 0].set_ylabel('residuals optimal', fontsize=30)
 
                 # VI posterior std
                 std_img = ax[4, t].imshow(std[t], vmin=std.min(), vmax=std.max(), cmap='Reds')
@@ -120,12 +131,43 @@ class LatticeInferenceCallback(Callback):
             cbar2 = fig.colorbar(std_img, ax=ax[4, :], shrink=0.8, aspect=4)
             cbar3 = fig.colorbar(res_img, ax=ax[5, :], shrink=0.8, aspect=4)
 
+            # cbar1 = fig.colorbar(data_img, ax=ax[:3, :], shrink=0.6, aspect=10)
+            # cbar2a = fig.colorbar(res_img_opt, ax=ax[3, :], shrink=0.8, aspect=4)
+            # cbar2 = fig.colorbar(std_img, ax=ax[4, :], shrink=0.8, aspect=4)
+            # cbar3 = fig.colorbar(res_img, ax=ax[5, :], shrink=0.8, aspect=4)
+
             cbar1.ax.tick_params(labelsize=20)
             cbar2.ax.tick_params(labelsize=20)
+            # cbar2a.ax.tick_params(labelsize=20)
             cbar3.ax.tick_params(labelsize=20)
 
             wandb.log({'overview': wandb.Image(plt)})
             plt.close(fig)
+
+
+            # # plot example timeseries
+            # mask = pl_module.mask #.reshape(img_shape).cpu().detach()
+            # data = data.reshape(pl_module.T, -1)
+            # data[data == 0] = np.nan
+            # vi_mean = vi_mean.reshape(pl_module.T, -1).cpu()
+            # true_mean = true_mean.reshape(pl_module.T, -1).cpu()
+            # fig, ax = plt.subplots(figsize=(10, 6))
+            # l = ax.plot(vi_mean.mean(1), label='VI mean')
+            # ax.fill_between(range(pl_module.T), vi_mean.mean(1) - vi_mean.std(1), vi_mean.mean(1) + vi_mean.std(1),
+            #                 alpha=0.2, color=l[0].get_color())
+            # l = ax.plot(true_mean.mean(1), label='CG mean')
+            # ax.fill_between(range(pl_module.T), true_mean.mean(1) - true_mean.std(1),
+            #                 true_mean.mean(1) + true_mean.std(1),
+            #                 alpha=0.2, color=l[0].get_color())
+            # data_mean = np.nanmean(data.cpu().numpy(), axis=1)
+            # data_std = np.nanstd(data.cpu().numpy(), axis=1)
+            # l = ax.plot(data_mean, label='data mean')
+            # ax.fill_between(range(pl_module.T), data_mean - data_std, data_mean + data_std,
+            #                 alpha=0.2, color=l[0].get_color())
+            # ax.set(xlabel='time')
+            # ax.legend()
+            # self.logger.log_image(key='mean_timeseries', images=[fig])
+            # plt.close()
 
 class GraphInferenceCallback(Callback):
 
@@ -137,23 +179,47 @@ class GraphInferenceCallback(Callback):
         self.graph_t = graph_t
         self.tidx = tidx
 
+        pos = graph_t.pos.cpu()
+
+        fig, ax = plt.subplots(figsize=(15, 10))
+        ax.scatter(pos[:, 0], pos[:, 1], alpha=0.1, color='gray', s=2)
+        ax.scatter(pos[train_nodes, 0], pos[train_nodes, 1], alpha=0.5, color='red', s=8)
+        ax.scatter(pos[val_nodes, 0], pos[val_nodes, 1], alpha=0.5, color='orange', s=8)
+        for idx in train_nodes:
+            ax.text(pos[idx, 0], pos[idx, 1], str(idx), fontsize=8, color='red')
+        for idx in val_nodes:
+            ax.text(pos[idx, 0], pos[idx, 1], str(idx), fontsize=8, color='orange')
+        self.logger.log_image(key='train_val_node_map', images=[fig])
+
+
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
 
-        vi_mean = pl_module.vi_dist.mean_param.reshape(pl_module.T, -1)
-        data = pl_module.y_masked.reshape(pl_module.T, -1)
+        # vi_mean = pl_module.vi_dist.mean_param.reshape(pl_module.T, -1)
+        vi_mean, vi_std = pl_module.vi_dist.posterior_estimate()
+        vi_mean = vi_mean.reshape(pl_module.T, -1).cpu()
+        vi_std = vi_std.reshape(pl_module.T, -1).cpu()
+        data = pl_module.y_masked.reshape(pl_module.T, -1).cpu()
 
         fig, ax = plt.subplots(figsize=(10, 6))
-        for idx in self.val_nodes[:3]:
-            l = ax.plot(vi_mean[:, idx].cpu(), label=f'node {idx}')
-            ax.plot(data[:, idx].cpu(), c=l[0].get_color(), ls='--')
+        for idx in self.val_nodes: #[:3]:
+            l = ax.plot(vi_mean[:, idx], label=f'node {idx}')
+            ax.fill_between(range(pl_module.T), vi_mean[:, idx] - vi_std[:, idx], vi_mean[:, idx] + vi_std[:, idx],
+                            alpha=0.2, color=l[0].get_color())
+            # for jdx in range(vi_samples.size(0)):
+            #     ax.plot(vi_samples[jdx, :, idx].cpu(), c=l[0].get_color(), alpha=0.1)
+            ax.plot(data[:, idx], '--', c=l[0].get_color(), alpha=0.6)
         ax.legend()
         self.logger.log_image(key='example_val_timeseries', images=[fig])
         plt.close()
 
         fig, ax = plt.subplots(figsize=(10, 6))
-        for idx in self.train_nodes[:3]:
-            l = ax.plot(vi_mean[:, idx].cpu(), label=f'node {idx}')
-            ax.plot(data[:, idx].cpu(), c=l[0].get_color(), ls='--')
+        for idx in self.train_nodes: #[:3]:
+            l = ax.plot(vi_mean[:, idx], label=f'node {idx}')
+            ax.fill_between(range(pl_module.T), vi_mean[:, idx] - vi_std[:, idx], vi_mean[:, idx] + vi_std[:, idx],
+                            alpha=0.2, color=l[0].get_color())
+            # for jdx in range(vi_samples.size(0)):
+            #     ax.plot(vi_samples[jdx, :, idx].cpu(), c=l[0].get_color(), alpha=0.1)
+            ax.plot(data[:, idx], '--', c=l[0].get_color(), alpha=0.6)
         ax.legend()
         self.logger.log_image(key='example_train_timeseries', images=[fig])
         plt.close()
@@ -164,11 +230,11 @@ class GraphInferenceCallback(Callback):
         ax_divider = make_axes_locatable(ax)
         cax = ax_divider.append_axes("right", size="7%", pad="2%")
 
-        indices = self.graph_t.mask.nonzero().squeeze().cpu().numpy()
+        indices = pl_module.mask.reshape(pl_module.T, -1)[self.tidx].nonzero().squeeze().cpu().numpy()
         pos = self.graph_t.pos.cpu().numpy()
         data = pl_module.y_masked.reshape(pl_module.T, -1)[self.tidx, indices].cpu().numpy()
         plot_nodes(dir, self.graph_t, pos, data,
-                   indices, ax, cax, fig)
+                   indices, fig, ax, cax)
         self.logger.log_image(key=f'data_tidx={self.tidx}', images=[fig])
         plt.close()
 
@@ -185,7 +251,7 @@ class GraphInferenceCallback(Callback):
         ax_divider = make_axes_locatable(ax)
         cax = ax_divider.append_axes("right", size="7%", pad="2%")
         plot_nodes(dir, self.graph_t, pos, mean.cpu().numpy(),
-                   indices, ax, cax, fig)
+                   indices, fig, ax, cax)
         self.logger.log_image(key=f'vi_mean_tidx={self.tidx}', images=[fig])
         plt.close()
 
@@ -194,37 +260,37 @@ class GraphInferenceCallback(Callback):
         ax_divider = make_axes_locatable(ax)
         cax = ax_divider.append_axes("right", size="7%", pad="2%")
         plot_nodes(dir, self.graph_t, pos, std.cpu().numpy(),
-                   indices, ax, cax, fig)
+                   indices, fig, ax, cax)
         self.logger.log_image(key=f'vi_std_tidx={self.tidx}', images=[fig])
         plt.close()
 
-        # use CG to approximate true posterior
+        # # use CG to approximate true posterior
         data = torch.zeros(pl_module.mask.size(), dtype=pl_module.y.dtype)
         data[pl_module.mask] = pl_module.y
-        true_mean = posterior_mean(pl_module.dgmrf, data.reshape(1, *pl_module.input_shape),
-                                   pl_module.mask, self.config, v=vi_mean).detach() #.cpu().detach()
-
-        # plot CG mean
-        fig, ax = plt.subplots(figsize=(15, 10))
-        ax_divider = make_axes_locatable(ax)
-        cax = ax_divider.append_axes("right", size="7%", pad="2%")
-        plot_nodes(dir, self.graph_t, pos, true_mean.reshape(pl_module.T, -1)[self.tidx].cpu().numpy(),
-                   indices, ax, cax, fig)
-        self.logger.log_image(key=f'CG_mean_tidx={self.tidx}', images=[fig])
-        plt.close()
+        # true_mean = posterior_mean(pl_module.dgmrf, data.reshape(1, *pl_module.input_shape),
+        #                            pl_module.mask, self.config, v=vi_mean).detach() #.cpu().detach()
+        #
+        # # plot CG mean
+        # fig, ax = plt.subplots(figsize=(15, 10))
+        # ax_divider = make_axes_locatable(ax)
+        # cax = ax_divider.append_axes("right", size="7%", pad="2%")
+        # plot_nodes(dir, self.graph_t, pos, true_mean.reshape(pl_module.T, -1)[self.tidx].cpu().numpy(),
+        #            indices, fig, ax, cax)
+        # self.logger.log_image(key=f'CG_mean_tidx={self.tidx}', images=[fig])
+        # plt.close()
 
         # plot mean difference between VI and CG mean
         data = data.reshape(pl_module.T, -1)
         data[data == 0] = np.nan
         vi_mean = vi_mean.reshape(pl_module.T, -1).cpu()
-        true_mean = true_mean.reshape(pl_module.T, -1).cpu()
+        # true_mean = true_mean.reshape(pl_module.T, -1).cpu()
         fig, ax = plt.subplots(figsize=(10, 6))
         l = ax.plot(vi_mean.mean(1), label='VI mean')
         ax.fill_between(range(pl_module.T), vi_mean.mean(1)-vi_mean.std(1), vi_mean.mean(1)+vi_mean.std(1),
                         alpha=0.2, color=l[0].get_color())
-        l = ax.plot(true_mean.mean(1), label='CG mean')
-        ax.fill_between(range(pl_module.T), true_mean.mean(1) - true_mean.std(1), true_mean.mean(1) + true_mean.std(1),
-                        alpha=0.2, color=l[0].get_color())
+        # l = ax.plot(true_mean.mean(1), label='CG mean')
+        # ax.fill_between(range(pl_module.T), true_mean.mean(1) - true_mean.std(1), true_mean.mean(1) + true_mean.std(1),
+        #                 alpha=0.2, color=l[0].get_color())
         data_mean = np.nanmean(data.cpu().numpy(), axis=1)
         data_std = np.nanstd(data.cpu().numpy(), axis=1)
         l = ax.plot(data_mean, label='data mean')

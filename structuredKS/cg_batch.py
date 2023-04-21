@@ -56,6 +56,7 @@ def cg_batch(A_bmm, B, M_bmm=None, X0=None, rtol=1e-3, atol=0., maxiter=None, ve
     Z_k2 = Z_k
 
     B_norm = torch.norm(B, dim=1)
+    print(f'B_norm = {B_norm}')
     stopping_matrix = torch.max(rtol*B_norm, atol*torch.ones_like(B_norm))
 
     if verbose:
@@ -92,6 +93,7 @@ def cg_batch(A_bmm, B, M_bmm=None, X0=None, rtol=1e-3, atol=0., maxiter=None, ve
         end_iter = time.perf_counter()
 
         residual_norm = torch.norm(A_bmm(X_k) - B, dim=1)
+        print(f'residual norm = {residual_norm}')
 
         if verbose:
             print("%03d | %8.4e %4.2f" %

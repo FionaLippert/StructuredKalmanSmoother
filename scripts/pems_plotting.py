@@ -8,8 +8,9 @@ from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 import networkx as nx
 import os.path as osp
 
-def plot_nodes(dir, G, pos, values, indices, ax, cax, fig, vmin=None, vmax=None, filename=None,
-              node_size=50, alpha=0.6, cmap_name='viridis', plot_title=None):
+def plot_nodes(dir, G, pos, values, indices, fig, ax, cax=None, vmin=None, vmax=None, filename=None,
+              node_size=50, alpha=0.6, cmap_name='viridis', plot_title=None, unobs_color=(0, 0, 0, 1),
+               edge_width=1, arrowsize=5):
 
 
     if vmin is None: vmin = np.min(values)
@@ -18,13 +19,15 @@ def plot_nodes(dir, G, pos, values, indices, ax, cax, fig, vmin=None, vmax=None,
     cmap = colormaps.get_cmap(cmap_name)
     norm = Normalize(vmin=vmin, vmax=vmax)
 
-    colors = [(0, 0, 0, 1) for v in range(G.num_nodes)]
+    colors = [unobs_color for v in range(G.num_nodes)]
     for idx, val in zip(indices, values):
         colors[idx] = cmap(norm(val))
 
     G_nx = ptg.utils.convert.to_networkx(G)
     nx.draw_networkx_nodes(G_nx, pos, node_size=node_size, node_color=colors,
                            alpha=alpha, ax=ax)
+    nx.draw_networkx_edges(G_nx, pos, ax=ax, alpha=alpha, width=edge_width, arrowsize=arrowsize,
+                           connectionstyle='arc3,rad=0.2')
 
     if plot_title is not None:
         ax.set_title(plot_title)
@@ -33,8 +36,9 @@ def plot_nodes(dir, G, pos, values, indices, ax, cax, fig, vmin=None, vmax=None,
     # ctx.add_basemap(ax=ax, crs='epsg:4326')
     ax.set_axis_off()
 
-    cbar = fig.colorbar(cm.ScalarMappable(norm, cmap), orientation='vertical', cax=cax)
-        # cbar.ax.tick_params(labelsize=10)
+    if cax is not None:
+        cbar = fig.colorbar(cm.ScalarMappable(norm, cmap), orientation='vertical', cax=cax)
+            # cbar.ax.tick_params(labelsize=10)
 
     if filename is not None:
         plt.savefig(osp.join(dir, f'{filename}.png'), dpi=500)#, transparent=True)
