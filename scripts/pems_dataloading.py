@@ -9,6 +9,7 @@ from shapely.geometry import Point, LineString
 from shapely.ops import nearest_points
 import contextily as ctx
 import matplotlib.pyplot as plt
+import pyproj
 from matplotlib import cm, colormaps
 from matplotlib.colors import Normalize
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
@@ -46,10 +47,10 @@ def clean_graph(G):
         G.remove_nodes_from(to_remove)
     G = nx.convert_node_labels_to_integers(G)
 
-    lanes = nx.get_edge_attributes(G, 'lanes')
+    lanes = {e : int(l) if len(l) == 1 else int(max(l)) for e, l in nx.get_edge_attributes(G, 'lanes').items()}
 
     # add lane info to motorway_links
-    new_lanes = {(u, v, k): '1' for u, v, k, d in G.edges(keys=True, data=True) if not 'lanes' in d}
+    new_lanes = {(u, v, k): 1 for u, v, k, d in G.edges(keys=True, data=True) if not 'lanes' in d}
     nx.set_edge_attributes(G, values={**lanes, **new_lanes}, name='lanes')
 
     # add attributes 'speed_kph' and 'travel_time' to all edges (if speed info is not available it is imputed)
@@ -114,7 +115,10 @@ def insert_stations(G, coords, crs=3857):
             l_ratio = geom.project(sensor_point, normalized=True)
             l_1, l_2 = l_ratio * edge['length'], (1 - l_ratio) * edge['length']
             new_vertex = nearest_points(geom, sensor_point)[0]
-            G.add_node(len(G), x=new_vertex.x, y=new_vertex.y, street_count=2)
+            new_vertex_lonlat = gpd.GeoSeries(new_vertex, crs=crs).to_crs(4326)[0]
+
+            G.add_node(len(G), x=new_vertex.x, y=new_vertex.y,
+                       lon=new_vertex_lonlat.x, lat=new_vertex_lonlat.y, street_count=2)
             # convert length [m] and speed [km/h] to travel time [s]
             speed_ms = edge['speed_kph'] * 5 / 18
             travel_time_1 = l_1 / speed_ms
@@ -136,19 +140,19 @@ def insert_stations(G, coords, crs=3857):
     # G = osmnx.get_undirected(G)
 
     # Weights are inversely proportional to the length of the road
-    lengths = nx.get_edge_attributes(G, 'length')
-    lengths_list = list(lengths.values())
-    mean_length = np.mean(lengths_list)
-    weights = {}
-    for edge, length in lengths.items():
-        weights[edge] = mean_length / length
-    nx.set_edge_attributes(G, values=weights, name='weight')
+    # lengths = nx.get_edge_attributes(G, 'length')
+    # lengths_list = list(lengths.values())
+    # # mean_length = np.mean(lengths_list)
+    # weights = {}
+    # for edge, length in lengths.items():
+    #     weights[edge] = 1. / length
+    # nx.set_edge_attributes(G, values=weights, name='weight')
 
     G_nx = nx.MultiDiGraph(G.edges())
-    nx.set_edge_attributes(G_nx, values=weights, name='weight')
+    # nx.set_edge_attributes(G_nx, values=weights, name='weight')
     for edge_attr in ['length', 'lanes', 'speed_kph', 'travel_time']:
         nx.set_edge_attributes(G_nx, values=nx.get_edge_attributes(G, edge_attr), name=edge_attr)
-    for node_attr in ['x', 'y', 'street_count']:
+    for node_attr in ['x', 'y', 'lon', 'lat', 'street_count']:
         values = nx.get_node_attributes(G, node_attr)
         print(node_attr, len(values))
         nx.set_node_attributes(G_nx, values=values, name=node_attr)
@@ -178,6 +182,14 @@ def load_traffic_data(dir, id_to_idx, hours=range(5, 23), minutes=range(60)):
 
     # filter stations
     df = df[df.ID.isin(id_to_idx.keys())]
+
+    print(f'df size before = {len(df)}')
+
+    # filter out zero-flow measurements
+    df.Flow[df.Flow == 0] = np.nan
+    df.dropna(inplace=True)
+
+    print(f'df size after = {len(df)}')
 
     return df
 
@@ -285,6 +297,7 @@ if __name__ == "__main__":
     df_traffic['Node'] = df_traffic.Index.apply(lambda idx: idx_to_node[idx])
     df_traffic['Lanes'] = df_traffic.ID.apply(lambda id: id_to_lanes[id])
     df_traffic['Dir'] = df_traffic.ID.apply(lambda id: id_to_dir[id])
+    df_traffic['AvgFlow'] = df_traffic.Flow / df_traffic.Lanes
 
     with open(osp.join(dir, 'processed_osmnx_graph.pkl'), 'wb') as f:
         pickle.dump(G, f)

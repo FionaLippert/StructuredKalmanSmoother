@@ -4,10 +4,11 @@ from torch_sparse import SparseTensor
 import networkx as nx
 from matplotlib import pyplot as plt
 import os
-from structuredKS import utils
+from structuredKS import utils, cg_batch
 from time import perf_counter
 import numpy as np
 from torch.distributions.multivariate_normal import MultivariateNormal
+import scipy.linalg as spl
 
 def Matrn_G(L, tau, kappa2, gamma):
     G = tau * (kappa2 * torch.eye(L.shape[0]) + L)**gamma
@@ -71,6 +72,20 @@ def transition_matrix(coeffs):
 
     return F
 
+def transition_matrix_exponential(coeffs, k_max=1):
+
+    F = torch.eye(coeffs.size(0))
+    A = coeffs - torch.diag(coeffs.sum(1))
+    term_k = F
+    z = 1
+    for i in range(k_max):
+        k = i+1
+        z /= k
+        term_k = z * A @ term_k
+        F += term_k
+
+    return F
+
 def construct_joint_F(transition_matrix, T):
     joint_rows = []
     joint_cols = []
@@ -113,53 +128,8 @@ def construct_joint_G(initial_G, transition_G, T):
 
 
 
-def get_normal(u, v, max=None):
-    dx = v[0] - u[0]
-    dy = v[1] - u[1]
-
-    # take care of periodic boundaries
-    if abs(dx) == max:
-        dx = -dx
-    if abs(dy) == max:
-        dy = -dy
-
-    normal = torch.tensor([dx, dy])
-    norm = torch.pow(normal, 2).sum().sqrt()
-    normal = normal / norm
-    return normal
-
-# def assemble_graph(latent_states, latent_pos, grid_size, T, data, spatial_edges, temporal_edges, spatiotemporal_edges,
-#                    spatiotemporal_attr, observation_edges, observation_weights, observation_noise_std):
-#
-#     graph = ptg.data.HeteroData()
-#
-#     # latent node properties
-#     graph['latent'].x = latent_states
-#     graph['latent'].pos = latent_pos
-#     graph['latent'].N = grid_size**2
-#     graph['latent'].grid_size = grid_size
-#     graph['latent'].T = T
-#
-#     # data node properties
-#     graph['data'].x = data
-#     graph['data'].noise_std = observation_noise_std
-#
-#     # edges
-#     graph['latent', 'spatial', 'latent'].edge_index = spatial_edges
-#     graph['latent', 'temporal', 'latent'].edge_index = temporal_edges
-#
-#     graph['latent', 'spatiotemporal', 'latent'].edge_index = spatiotemporal_edges
-#     graph['latent', 'spatiotemporal', 'latent'].edge_attr = spatiotemporal_attr
-#
-#     graph['latent', 'observation', 'data'].edge_index = observation_edges
-#     graph['latent', 'observation', 'data'].edge_weight = observation_weights
-#
-#     return graph
-
-
-
 def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.01, obs_ratio=0.8,
-                  transition_noise_std=0.1, seed=0, n_transitions=1):
+                  transition_noise_std=0.1, seed=0, n_transitions=1, k_max=2):
     # set seed for reproducibility
     torch.manual_seed(seed)
 
@@ -169,58 +139,77 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
     g = nx.grid_2d_graph(grid_size, grid_size, periodic=True, create_using=g)
     node_pos = torch.tensor(list(g.nodes()))
     node_dict = dict(zip(list(g.nodes()), range(len(g))))
-    normals = torch.stack([get_normal(u, v, max=grid_size - 1) for u, v in g.edges()], dim=0)
+    normals = torch.stack([utils.get_normal(u, v, max=grid_size - 1) for u, v in g.edges()], dim=0)
 
     # adjacency matrix
     adj = torch.tensor(nx.adjacency_matrix(g).todense())
+    # add self-loops
+    # adj += torch.eye(adj.size(0), dtype=adj.dtype)
     edges, _ = ptg.utils.dense_to_sparse(adj)
 
     # constructing spatial graphs
     D = torch.diag(adj.sum(0))
     L = D - adj
     P_0 = Matrn_G(L, 1, 0, 1)
-    P_t = torch.eye(N) / transition_noise_std
+    print(f'P0 = {P_0}')
 
-    # only remove self loops if not diagonal??
-    transition_edges, _ = ptg.utils.dense_to_sparse(P_t)
-    # transition_edges, _ = ptg.utils.remove_self_loops(ptg.utils.dense_to_sparse(P_t))
+    if T > 1:
+        # P_t = torch.eye(N) / transition_noise_std
+        P_t = torch.eye(N) / transition_noise_std - adj
 
-    # define dynamics
-    F_coeffs = torch.zeros(N, N)
-    identity = True
-    velocities = torch.zeros(2, len(g))
-    if diffusion:
-        print(f'use diffusion coefficient = {diffusion}')
-        F_coeffs += diffusion_coeffs(adj, diffusion)
-        identity = False
-    if not advection == 'zero':
-        if advection == 'constant':
-            velocities = torch.tensor([-0.3, 0.3]).unsqueeze(1).repeat(1, N)
-        else:
-            P_v = Matrn_G(L, 1000, 0, 1)
-            velocities, _, _ = utils.sample_GMRF(P_v, torch.zeros(2, N))
-            velocities = 0.1 * torch.tensor([[np.sin(2 * np.pi * x / grid_size),
-                                              np.sin(2 * np.pi * y / grid_size)] for x, y in g.nodes()]).T
-            print(velocities.min(), velocities.max())
-            print(velocities)
-        edge_velocities = {(u, v): (normals[i] * 0.5 * (velocities[:, node_dict[u]] + velocities[:, node_dict[v]])).sum()
-                           for i, (u, v) in enumerate(g.edges())}
-        nx.set_edge_attributes(g, edge_velocities, name='velocity')
-        edge_velocities = torch.tensor(nx.adjacency_matrix(g, weight='velocity').todense())
-        F_coeffs += advection_coeffs(edge_velocities)
-        identity = False
-    print(F_coeffs)
-    if identity:
-        print(f'use copy operator (identity) as dynamics')
+        # only remove self loops if not diagonal??
+        transition_edges, _ = ptg.utils.dense_to_sparse(P_t)
+        # TODO: test this out
+        # transition_edges, _ = ptg.utils.remove_self_loops(ptg.utils.dense_to_sparse(P_t))
 
-    F = transition_matrix(F_coeffs)
-    F = torch.linalg.matrix_power(F, n_transitions)
+        # define dynamics
+        F_coeffs = torch.zeros(N, N)
+        identity = True
+        velocities = torch.zeros(2, len(g))
+        if diffusion:
+            print(f'use diffusion coefficient = {diffusion}')
+            # P_d = Matrn_G(L, 100, 0, 1)
+            # diff_coeffs, _, _ = utils.sample_GMRF(P_d, torch.zeros(N))
+            # print(diff_coeffs.min(), diff_coeffs.max())
+            # # diff_coeffs = torch.exp(diff_coeffs)
+            # diff_coeffs = diff_coeffs - diff_coeffs.min()
+            # print(diff_coeffs.min(), diff_coeffs.max())
+            # F_coeffs += 0.01 * torch.diag(diff_coeffs) @ adj.float()
+            F_coeffs += diffusion_coeffs(adj, diffusion)
+            identity = False
+        if not advection == 'zero':
+            if advection == 'constant':
+                velocities = torch.tensor([-0.3, 0.3]).unsqueeze(1).repeat(1, N)
+            else:
+                P_v = Matrn_G(L, 1000, 0, 1)
+                velocities, _, _ = utils.sample_GMRF(P_v, torch.zeros(2, N))
+                # velocities = 0.1 * torch.tensor([[np.sin(2 * np.pi * x / grid_size),
+                #                                   np.sin(2 * np.pi * y / grid_size)] for x, y in g.nodes()]).T
+                print(velocities.min(), velocities.max())
+                print(velocities)
+            edge_velocities = {(u, v): (normals[i] * 0.5 * (velocities[:, node_dict[u]] + velocities[:, node_dict[v]])).sum()
+                               for i, (u, v) in enumerate(g.edges())}
+            nx.set_edge_attributes(g, edge_velocities, name='velocity')
+            edge_velocities = torch.tensor(nx.adjacency_matrix(g, weight='velocity').todense())
+            F_coeffs += advection_coeffs(edge_velocities)
+            identity = False
+        print(F_coeffs)
+        if identity:
+            print(f'use copy operator (identity) as dynamics')
 
-    # define joint distribution
-    joint_F = construct_joint_F(F.to_sparse(), T)
-    joint_Q = construct_joint_G(P_0.to_sparse(), P_t.to_sparse(), T)
-    joint_G = (joint_Q @ (sparse_identity(N * T) - joint_F))
-    print(joint_G.to_dense().min())
+        # F = transition_matrix(F_coeffs)
+        F = transition_matrix_exponential(F_coeffs, k_max=k_max)
+        # assert torch.allclose(F, F2)
+        F = torch.linalg.matrix_power(F, n_transitions)
+
+        # define joint distribution
+        joint_F = construct_joint_F(F.to_sparse(), T)
+        joint_Q = construct_joint_G(P_0.to_sparse(), P_t.to_sparse(), T)
+        joint_G = (joint_Q @ (sparse_identity(N * T) - joint_F))
+        print(joint_G.to_dense().min())
+    else:
+        joint_G = P_0.to_sparse()
+
     mean = torch.zeros(N * T)
 
     # draw samples
@@ -234,7 +223,8 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
     H = []
     states = []
 
-    transition_noise_distr = MultivariateNormal(loc=torch.zeros(N), precision_matrix=P_t.transpose(0, 1) @ P_t)
+    if T>1:
+        transition_noise_distr = MultivariateNormal(loc=torch.zeros(N), precision_matrix=P_t.transpose(0, 1) @ P_t)
     initial_noise_distr = MultivariateNormal(loc=torch.zeros(N), precision_matrix=P_0.transpose(0, 1) @ P_0)
     for t in range(T):
         # states_t = states[t * N:(t + 1) * N]
@@ -258,8 +248,9 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
 
         # construct graph with spatiotemporal edges
         if t > 0:
+            # TODO: potentially use transition_edges for temporal graph?
             spatiotemporal_graphs.append(utils.assemble_graph_t(states_t, node_pos, grid_size, data_t, mask_t,
-                            transition_edges, edges, observation_edges, obs_noise_std, temporal_edge_attr=normals))
+                            edges, edges, observation_edges, obs_noise_std, temporal_edge_attr=normals))
             # st_graph_t["latent", "spatial", "latent"].eigvals = utils.compute_eigenvalues(
             #     st_graph_t["latent", "spatial", "latent"])
             # spatiotemporal_graphs.append(st_graph_t)
@@ -267,14 +258,21 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
             # print(spatiotemporal_graphs[-1])
         else:
             spatiotemporal_graphs.append(spatial_graphs[-1])
+
         y.append(y_t)
         data.append(data_t)
         H.append(H_t.to_sparse())
         states.append(states_t)
 
-    y = torch.cat(y, dim=0)
-    data = torch.cat(data, dim=0)
-    states = torch.cat(states, dim=0)
+    if T > 1:
+        y = torch.cat(y, dim=0)
+        data = torch.cat(data, dim=0)
+        states = torch.cat(states, dim=0)
+    else:
+        y = y[0]
+        data = data[0]
+        states = states[0]
+
     H = utils.sparse_block_diag(*H)
     mask = get_mask(H.to_dense())
     R_inv = sparse_identity(H.size(0)) / (obs_noise_std**2)
@@ -283,6 +281,7 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
     joint_precision = joint_G.transpose(0, 1) @ joint_G
     posterior_prec, posterior_eta = utils.compute_posterior(joint_precision.to_dense(), mean, y, H, R_inv)
     posterior_mean = torch.inverse(posterior_prec) @ posterior_eta
+    posterior_std = torch.diag(torch.inverse(posterior_prec))
 
     joint_edges = joint_G.coalesce().indices()
     joint_weights = joint_G.coalesce().values()
@@ -294,6 +293,8 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
 
     spatial_graphs = ptg.data.Batch.from_data_list(spatial_graphs)
     spatiotemporal_graphs = ptg.data.Batch.from_data_list(spatiotemporal_graphs)
+    spatiotemporal_graphs['latent'].true_posterior_mean = posterior_mean
+    spatiotemporal_graphs['latent'].true_posterior_std = posterior_std
     if not advection == 'zero':
         spatiotemporal_graphs['latent'].velocities = velocities.T
 
@@ -307,12 +308,64 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
     graph_post_mean = graph_y.clone()
     graph_post_mean.x = posterior_mean
 
-    return {"spatial_graphs": spatial_graphs,
+    graph_post_std = graph_y.clone()
+    graph_post_std.x = posterior_std
+
+    spatial_graph = ptg.data.Data(edge_index=edges, pos=node_pos)
+    temporal_graph = spatial_graph.clone()
+
+    spatial_graph.eigvals = utils.compute_eigenvalues(spatial_graph)
+    temporal_graph.edge_attr = normals
+
+
+    # test CG method
+    mean_hat = cg_solve(posterior_eta, posterior_prec, rtol=1e-7)
+    eigvals = spl.eigvals(posterior_prec).real
+    print(f'condition number = {eigvals.max() / eigvals.min()}')
+
+    data_dict = {
+            "spatial_graph": spatial_graph,
+            "temporal_graph": temporal_graph,
+            "data": y,
+            "gt": states,
+            "masks": mask.reshape(T, -1),
+            "true_posterior_mean": posterior_mean,
+            "cg_posterior_mean": mean_hat,
+            "true_posterior_std": posterior_std,
+            "spatial_graphs": spatial_graphs,
             "spatiotemporal_graphs": spatiotemporal_graphs,
             "joint_graph": joint_graph,
             "graph_y": graph_y,
             "graph_post_true_mean": graph_post_mean,
-            "velocities": velocities}
+            "graph_post_true_std": graph_post_std
+            }
+    if T>1:
+        data_dict["velocities"] = velocities
+
+
+    return data_dict
+
+def cg_solve(rhs, omega, rtol):
+    # rhs has shape [n_batch, T * n_nodes]
+
+    # CG requires more precision for numerical stability
+    rhs = rhs.to(torch.float64)
+    omega = omega.to(torch.float64)
+
+
+
+    def Q_tilde_batched(x):
+
+        return omega @ x
+
+    Q_tilde_func = Q_tilde_batched
+
+    solution, cg_info = cg_batch.cg_batch(Q_tilde_func, rhs.reshape(1, -1, 1), rtol=rtol, maxiter=100, verbose=True)
+
+    print("CG finished in {} iterations, solution optimal: {}".format(
+            cg_info["niter"], cg_info["optimal"]))
+
+    return solution.to(torch.float32)
 
 
 def time_func(func, *inputs):

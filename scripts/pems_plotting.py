@@ -9,8 +9,8 @@ import networkx as nx
 import os.path as osp
 
 def plot_nodes(dir, G, pos, values, indices, fig, ax, cax=None, vmin=None, vmax=None, filename=None,
-              node_size=50, alpha=0.6, cmap_name='viridis', plot_title=None, unobs_color=(0, 0, 0, 1),
-               edge_width=1, arrowsize=5):
+              node_size=50, node_alpha=0.8, edge_alpha=0.8, cmap_name='viridis', plot_title=None, unobs_color=(0, 0, 0, 1),
+               edge_width=1, arrowsize=5, mark_indices=None):
 
 
     if vmin is None: vmin = np.min(values)
@@ -23,11 +23,16 @@ def plot_nodes(dir, G, pos, values, indices, fig, ax, cax=None, vmin=None, vmax=
     for idx, val in zip(indices, values):
         colors[idx] = cmap(norm(val))
 
+
     G_nx = ptg.utils.convert.to_networkx(G)
     nx.draw_networkx_nodes(G_nx, pos, node_size=node_size, node_color=colors,
-                           alpha=alpha, ax=ax)
-    nx.draw_networkx_edges(G_nx, pos, ax=ax, alpha=alpha, width=edge_width, arrowsize=arrowsize,
-                           connectionstyle='arc3,rad=0.2')
+                           alpha=node_alpha, ax=ax)
+    nx.draw_networkx_edges(G_nx, pos, ax=ax, alpha=edge_alpha, width=edge_width, arrowsize=arrowsize),
+                           #connectionstyle='arc3,rad=0.2')
+
+    if mark_indices is not None:
+        ax.scatter(pos[mark_indices, 0], pos[mark_indices, 1], c='none', s=3*node_size, edgecolors='black')
+
 
     if plot_title is not None:
         ax.set_title(plot_title)

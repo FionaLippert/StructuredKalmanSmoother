@@ -2,10 +2,11 @@ import torch
 import wandb
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
+import torch_geometric as ptg
 import numpy as np
 from matplotlib import pyplot as plt
 
-from structuredKS.models.dgmrf import posterior_mean
+from structuredKS.models.dgmrf import *
 from pems_plotting import *
 
 class LogPredictionsCallback(Callback):
@@ -48,7 +49,7 @@ class LatticeInferenceCallback(Callback):
     def on_train_epoch_start(self, trainer, pl_module):
         # plot current vi mean and std
         img_shape = (pl_module.T, *self.grid_size)
-        mean, std = pl_module.vi_dist.posterior_estimate()
+        mean, std = pl_module.vi_dist.posterior_estimate(pl_module.noise_var)
         mean = mean.reshape(img_shape)
         std = std.reshape(img_shape)
 
@@ -67,8 +68,8 @@ class LatticeInferenceCallback(Callback):
             gt = pl_module.gt.reshape(img_shape).cpu().detach()
 
             # VI inference
-            mean, std = pl_module.vi_dist.posterior_estimate()
-            mean = mean.reshape(img_shape).cpu().detach()
+            vi_mean, std = pl_module.vi_dist.posterior_estimate(pl_module.noise_var)
+            mean = vi_mean.reshape(img_shape).cpu().detach()
             std = std.reshape(img_shape).cpu().detach()
 
             true_mean = self.true_post_mean.reshape(img_shape).cpu().detach()
@@ -81,16 +82,29 @@ class LatticeInferenceCallback(Callback):
             #     print(v_mean.size())
             # else:
             #     v_mean = None
-            # data = torch.zeros(pl_module.mask.size())
-            # data[pl_module.mask] = pl_module.y
-            # true_mean = posterior_mean(pl_module.dgmrf, data.reshape(1, *pl_module.input_shape),
-            #                            pl_module.mask, self.config, v=v_mean).reshape(img_shape).cpu().detach()
+            data = torch.zeros(pl_module.mask.size())
+            data[pl_module.mask] = pl_module.y
+            # cg_mean = posterior_mean(pl_module.dgmrf, data.reshape(1, *pl_module.input_shape),
+            #                            pl_module.mask, self.config, pl_module.noise_var,
+            #                          initial_guess=vi_mean.reshape(1, -1, 1)).reshape(img_shape).cpu().detach()
+
+            cg_mean, cg_std = posterior_inference(pl_module.dgmrf, data.reshape(1, *pl_module.input_shape),
+                                                  pl_module.mask, self.config, pl_module.noise_var)
+            cg_mean = cg_mean.reshape(img_shape).cpu().detach()
+            cg_std = cg_std.reshape(img_shape).cpu().detach()
+
+            cg_sample = sample_posterior(10, pl_module.dgmrf, data.reshape(1, *pl_module.input_shape),
+                                pl_module.mask, self.config, pl_module.noise_var).mean(0).reshape(img_shape).cpu().detach()
+
+            # cg_sample = sample_prior(1, pl_module.dgmrf, (1, pl_module.T, pl_module.num_nodes),
+            #                          self.config).reshape(img_shape).cpu().detach()
 
             data = torch.ones_like(pl_module.mask) * np.nan
             data[pl_module.mask] = pl_module.y
             data = data.reshape(img_shape).cpu().detach()
 
-            residuals = gt - mean
+            # residuals = gt - mean
+            residuals = gt - cg_mean
             # residuals_optimal = gt - true_mean
 
             vmin = gt.min()
@@ -108,19 +122,23 @@ class LatticeInferenceCallback(Callback):
                 ax[1, 0].set_ylabel('ground truth', fontsize=30)
 
                 # true posterior mean
-                ax[2, t].imshow(true_mean[t], vmin=vmin, vmax=vmax)
-                ax[2, 0].set_ylabel('true posterior mean', fontsize=30)
+                # ax[2, t].imshow(true_mean[t], vmin=vmin, vmax=vmax)
+                # ax[2, 0].set_ylabel('true posterior mean', fontsize=30)
+                ax[2, t].imshow(cg_mean[t], vmin=vmin, vmax=vmax)
+                ax[2, 0].set_ylabel('CG posterior mean', fontsize=30)
 
                 # VI posterior mean
-                ax[3, t].imshow(mean[t], vmin=vmin, vmax=vmax)
-                ax[3, 0].set_ylabel('VI mean', fontsize=30)
+                ax[3, t].imshow(cg_sample[t])
+                ax[3, 0].set_ylabel('CG posterior sample', fontsize=30)
+                # ax[3, t].imshow(mean[t], vmin=vmin, vmax=vmax)
+                # ax[3, 0].set_ylabel('VI mean', fontsize=30)
                 # res_img_opt = ax[3, t].imshow(true_residuals[t], vmin=-true_residuals.abs().max(), vmax=true_residuals.abs().max(),
                 #                           cmap='coolwarm')
                 # ax[3, 0].set_ylabel('residuals optimal', fontsize=30)
 
                 # VI posterior std
-                std_img = ax[4, t].imshow(std[t], vmin=std.min(), vmax=std.max(), cmap='Reds')
-                ax[4, 0].set_ylabel('VI std', fontsize=30)
+                std_img = ax[4, t].imshow(cg_std[t], vmin=cg_std.min(), vmax=cg_std.max(), cmap='Reds')
+                ax[4, 0].set_ylabel('CG posterior std', fontsize=30)
 
                 # residuals
                 res_img = ax[5, t].imshow(residuals[t], vmin=-residuals.abs().max(), vmax=residuals.abs().max(),
@@ -171,31 +189,73 @@ class LatticeInferenceCallback(Callback):
 
 class GraphInferenceCallback(Callback):
 
-    def __init__(self, logger, config, graph_t, tidx, val_nodes, train_nodes):
+    def __init__(self, logger, config, graph_t, tidx, val_nodes, train_nodes, test_nodes, subset=None, mark_subset=None):
         self.logger = logger
         self.config = config
-        self.val_nodes = val_nodes
-        self.train_nodes = train_nodes
         self.graph_t = graph_t
         self.tidx = tidx
+        self.subset = subset
+        self.mark_subset = mark_subset
 
         pos = graph_t.pos.cpu()
 
+        if subset is not None:
+            self.train_nodes = [i for i in train_nodes if i in subset]
+            self.val_nodes = [i for i in val_nodes if i in subset]
+            self.test_nodes = [i for i in test_nodes if i in subset]
+            self.all_nodes = subset.cpu()
+
+            sub_edges, sub_attr = ptg.utils.subgraph(self.subset, self.graph_t.edge_index,
+                                              edge_attr=self.graph_t.speed_kph, relabel_nodes=True)
+            self.subgraph = ptg.data.Data(edge_index=sub_edges, num_nodes=len(self.subset), edge_attr=sub_attr)
+
+            fig, ax = plt.subplots(figsize=(15, 10))
+
+            ax.scatter(pos[self.all_nodes, 0], pos[self.all_nodes, 1], alpha=0.1, color='gray', s=10)
+            ax.scatter(pos[self.train_nodes, 0], pos[self.train_nodes, 1], alpha=0.5, color='red', s=10)
+            ax.scatter(pos[self.val_nodes, 0], pos[self.val_nodes, 1], alpha=0.5, color='orange', s=10)
+            ax.scatter(pos[self.test_nodes, 0], pos[self.test_nodes, 1], alpha=0.5, color='green', s=10)
+            for idx in self.train_nodes:
+                ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='red')
+            for idx in self.val_nodes:
+                ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='orange')
+            for idx in self.test_nodes:
+                ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='green')
+
+            indices = np.arange(len(self.subset))
+            sub_pos = self.graph_t.pos[self.subset].cpu().numpy()
+            plot_nodes(dir, self.subgraph, sub_pos, np.ones(len(self.subset)), indices, fig, ax,
+                       node_alpha=0, edge_alpha=0.8, edge_width=sub_attr/sub_attr.max())
+
+            self.logger.log_image(key=f'subset_nodes', images=[fig])
+        else:
+            self.val_nodes = val_nodes
+            self.train_nodes = train_nodes
+            self.test_nodes = test_nodes
+            self.all_nodes = torch.arange(pos.size(0)).cpu()
+
+
+
         fig, ax = plt.subplots(figsize=(15, 10))
-        ax.scatter(pos[:, 0], pos[:, 1], alpha=0.1, color='gray', s=2)
-        ax.scatter(pos[train_nodes, 0], pos[train_nodes, 1], alpha=0.5, color='red', s=8)
-        ax.scatter(pos[val_nodes, 0], pos[val_nodes, 1], alpha=0.5, color='orange', s=8)
-        for idx in train_nodes:
-            ax.text(pos[idx, 0], pos[idx, 1], str(idx), fontsize=8, color='red')
-        for idx in val_nodes:
-            ax.text(pos[idx, 0], pos[idx, 1], str(idx), fontsize=8, color='orange')
-        self.logger.log_image(key='train_val_node_map', images=[fig])
+        ax.scatter(pos[self.all_nodes, 0], pos[self.all_nodes, 1], alpha=0.1, color='gray', s=2)
+        ax.scatter(pos[self.train_nodes, 0], pos[self.train_nodes, 1], alpha=0.5, color='red', s=8)
+        ax.scatter(pos[self.val_nodes, 0], pos[self.val_nodes, 1], alpha=0.5, color='orange', s=8)
+        ax.scatter(pos[self.test_nodes, 0], pos[self.test_nodes, 1], alpha=0.5, color='green', s=8)
+        for idx in self.train_nodes:
+            ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='red')
+        for idx in self.val_nodes:
+            ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='orange')
+        for idx in self.test_nodes:
+            ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='green')
+        self.logger.log_image(key='train_val_test_node_map', images=[fig])
+
+
 
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
 
         # vi_mean = pl_module.vi_dist.mean_param.reshape(pl_module.T, -1)
-        vi_mean, vi_std = pl_module.vi_dist.posterior_estimate()
+        vi_mean, vi_std = pl_module.vi_dist.posterior_estimate(pl_module.noise_var)
         vi_mean = vi_mean.reshape(pl_module.T, -1).cpu()
         vi_std = vi_std.reshape(pl_module.T, -1).cpu()
         data = pl_module.y_masked.reshape(pl_module.T, -1).cpu()
@@ -238,9 +298,10 @@ class GraphInferenceCallback(Callback):
         self.logger.log_image(key=f'data_tidx={self.tidx}', images=[fig])
         plt.close()
 
+
     def on_train_end(self, trainer, pl_module):
 
-        vi_mean, vi_std = pl_module.vi_dist.posterior_estimate()
+        vi_mean, vi_std = pl_module.vi_dist.posterior_estimate(pl_module.noise_var)
         mean = vi_mean.reshape(pl_module.T, -1)[self.tidx].detach()
         std = vi_std.reshape(pl_module.T, -1)[self.tidx].detach()
         indices = np.arange(self.graph_t.num_nodes)
@@ -263,6 +324,30 @@ class GraphInferenceCallback(Callback):
                    indices, fig, ax, cax)
         self.logger.log_image(key=f'vi_std_tidx={self.tidx}', images=[fig])
         plt.close()
+
+        if self.subset is not None:
+            print('plot subset')
+
+            indices = np.arange(len(self.subset))
+            pos = self.graph_t.pos[self.subset].cpu().numpy()
+
+            fig, ax = plt.subplots(figsize=(15, 10))
+            ax_divider = make_axes_locatable(ax)
+            cax = ax_divider.append_axes("right", size="7%", pad="2%")
+
+            plot_nodes(dir, self.subgraph, pos, mean[self.subset].cpu().numpy(), indices, fig, ax, cax,
+                       mark_indices=self.mark_subset.cpu().numpy())
+            self.logger.log_image(key=f'subset_vi_mean_tidx={self.tidx}', images=[fig])
+            plt.close()
+
+            fig, ax = plt.subplots(figsize=(15, 10))
+            ax_divider = make_axes_locatable(ax)
+            cax = ax_divider.append_axes("right", size="7%", pad="2%")
+
+            plot_nodes(dir, self.subgraph, pos, std[self.subset].cpu().numpy(), indices, fig, ax, cax,
+                       mark_indices=self.mark_subset.cpu().numpy())
+            self.logger.log_image(key=f'subset_vi_std_tidx={self.tidx}', images=[fig])
+            plt.close()
 
         # # use CG to approximate true posterior
         data = torch.zeros(pl_module.mask.size(), dtype=pl_module.y.dtype)

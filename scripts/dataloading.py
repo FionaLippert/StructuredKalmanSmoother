@@ -63,6 +63,23 @@ if T > 1:
 else:
     toydata.plot_spatial(graph_list[0], save_to=raw_data_dir)
 
+
+cg_mean = data["cg_posterior_mean"]
+fig, ax = plt.subplots(1, T, figsize=(T * 8, 8))
+vmin = cg_mean.min()
+vmax = cg_mean.max()
+cg_mean = cg_mean.reshape(T, args.grid_size, args.grid_size)
+for t in range(T):
+    img = ax[t].imshow(cg_mean[t], vmin=vmin, vmax=vmax)
+    ax[t].axis('off')
+    ax[t].set_title(f't = {t}', fontsize=30)
+
+cbar = fig.colorbar(img, ax=ax, shrink=0.6, aspect=10)
+cbar.ax.tick_params(labelsize=20)
+
+
+fig.savefig(os.path.join(raw_data_dir, f'cg_mean.png'), bbox_inches='tight')
+
 #
 # def save_graph_ds(save_dict, args, ds_name):
 #     ds_dir_path = os.path.join(constants.DS_DIR, ds_name)

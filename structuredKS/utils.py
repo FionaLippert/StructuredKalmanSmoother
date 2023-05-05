@@ -195,10 +195,27 @@ def assemble_graph_0(latent_states, latent_pos, grid_size, data, mask,
 
     return graph
 
+def weighted_degrees(graph):
+
+    # Compute weighted degrees of all nodes
+    D = torch.zeros(graph.num_nodes, dtype=graph.edge_weight.dtype)
+    D.scatter_add_(dim=0, index=graph.edge_index[0,:], src=graph.edge_weight)
+    return D
+
 # Computes all eigenvalues of the diffusion weight matrix D^(-1)A
 def compute_eigenvalues(graph):
     adj_matrix = ptg.utils.to_dense_adj(graph.edge_index)[0]
     node_degrees = ptg.utils.degree(graph.edge_index[0])
+
+    adj_matrix_norm = adj_matrix / node_degrees.unsqueeze(1)
+    adj_eigvals = spl.eigvals(adj_matrix_norm.cpu().numpy()).real
+
+    return torch.tensor(adj_eigvals, dtype=torch.float32)
+
+def compute_eigenvalues_weighted(graph):
+    adj_matrix = ptg.utils.to_dense_adj(graph.edge_index,
+            edge_attr=graph.edge_weight).squeeze()
+    node_degrees = graph.weighted_degrees
 
     adj_matrix_norm = adj_matrix / node_degrees.unsqueeze(1)
     adj_eigvals = spl.eigvals(adj_matrix_norm.cpu().numpy()).real

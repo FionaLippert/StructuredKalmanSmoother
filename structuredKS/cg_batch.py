@@ -56,10 +56,11 @@ def cg_batch(A_bmm, B, M_bmm=None, X0=None, rtol=1e-3, atol=0., maxiter=None, ve
     Z_k2 = Z_k
 
     B_norm = torch.norm(B, dim=1)
-    print(f'B_norm = {B_norm}')
+
     stopping_matrix = torch.max(rtol*B_norm, atol*torch.ones_like(B_norm))
 
     if verbose:
+        print(f'B_norm = {B_norm}')
         print("%03s | %010s %06s" % ("it", "dist", "it/s"))
 
     optimal = False
@@ -93,9 +94,10 @@ def cg_batch(A_bmm, B, M_bmm=None, X0=None, rtol=1e-3, atol=0., maxiter=None, ve
         end_iter = time.perf_counter()
 
         residual_norm = torch.norm(A_bmm(X_k) - B, dim=1)
-        print(f'residual norm = {residual_norm}')
+
 
         if verbose:
+            print(f'residual norm = {residual_norm}')
             print("%03d | %8.4e %4.2f" %
                   (k, torch.max(residual_norm-stopping_matrix),
                     1. / (end_iter - start_iter)))
@@ -106,13 +108,12 @@ def cg_batch(A_bmm, B, M_bmm=None, X0=None, rtol=1e-3, atol=0., maxiter=None, ve
 
     end = time.perf_counter()
 
-    if verbose:
-        if optimal:
-            print("Terminated in %d steps (optimal). Took %.3f ms." %
-                  (k, (end - start) * 1000))
-        else:
-            print("Terminated in %d steps (reached maxiter). Took %.3f ms." %
-                  (k, (end - start) * 1000))
+    if optimal:
+        print("CG terminated in %d steps (optimal). Took %.3f ms." %
+              (k, (end - start) * 1000))
+    else:
+        print("CG terminated in %d steps (reached maxiter). Took %.3f ms." %
+              (k, (end - start) * 1000))
 
 
     info = {

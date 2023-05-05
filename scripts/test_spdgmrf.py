@@ -28,38 +28,55 @@ def seed_all(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+
+parser = argparse.ArgumentParser(description='Run training and inference')
+
+parser.add_argument("--seed", type=int, default=0, help="Random seed")
+parser.add_argument("--obs_ratio", type=float, default=0.7, help="Fraction of points observed")
+parser.add_argument("--n_layers", type=int, default=1, help="number of DGMRF layers")
+
+
+args = parser.parse_args()
+
 print('define config')
 
-config = {"seed": 0,
-          # "dataset": "spatiotemporal_20x20_obs=0.7_T=20_diff=0.01_adv=constant_ntrans=4_0",
+config = {"seed": args.seed,
+          "dataset": f"spatiotemporal_20x20_obs={args.obs_ratio}_T=20_diff=0.01_adv=constant_ntrans=4_0",
           # "dataset": "spatiotemporal_20x20_obs=0.7_T=20_diff=0.0_adv=zero_ntrans=1_0",
-          "dataset": "pems_start=0_end=215",
-          "noise_std": 0.001,
-          "n_layers": 1,
+          # "dataset": "pems_start=0_end=215_AvgFlow",
+          "noise_std": 0.1,
+          "learn_noise_std": False,
+          "n_layers": args.n_layers,
           "n_transitions": 1,
           "diff_K": 1,
           "non_linear": False,
           "fix_gamma": False,
+          "gamma_value": 1,
           "log_det_method": "eigvals",
           "use_bias": True,
+          "use_dynamics_bias": False,
           "n_training_samples": 10,
           "n_post_samples": 100,
           "vi_layers": 1,
           "features": False,
           "optimizer": "adam",
-          "lr": 0.1,
+          "lr": 0.01,
           "val_interval": 100,
-          "n_iterations": 10000,
+          "n_iterations": 5000,
           "use_dynamics": True,
           "independent_time": False,
           "use_hierarchy": False,
-          "transition_type": "diffusion",
+          "transition_type": "advection+diffusion",
           "inference_rtol": 1e-7,
+          "max_cg_iter": 500,
           "device": "gpu",
-          "early_stopping_patience": 100}
+          "early_stopping_patience": 100,
+          "weighted_dgmrf": False,
+          "weighted_vi": False}
 
-# experiment = 'constant_advection_07_dgmrf_varying_layers'
-experiment = 'pems100-200_dgmrf_varying_layers'
+# experiment = 'constant_advection_05_dgmrf_varying_layers'
+# experiment = 'pems_flow_dgmrf_varying_layers'
+experiment = 'obs=0.7'
 
 print('set seed')
 
@@ -84,15 +101,14 @@ print('setup wandb')
 
 
 # Init wandb
-wandb_name = f"{config['dataset']}-{config['transition_type']}-diffK={config['diff_K']}-" \
-             f"indepT={config['independent_time']}-layers={config['n_layers']}-bias={config['use_bias']}-{time.strftime('%H-%M')}"
-# wandb.init(project=constants.WANDB_PROJECT, config=config, name=wandb_name)
+wandb_name = f"{config['transition_type']}-" \
+             f"indepT={config['independent_time']}-layers={config['n_layers']}-bias={config['use_bias']}-" \
+             f"{config['n_transitions']}trans-obs={args.obs_ratio}-{time.strftime('%H-%M')}"
 wandb.init(project=experiment, config=config, name=wandb_name)
 
 print('load data')
 
 dataset_dict = utils.load_dataset(config["dataset"], device=device)
-# graphs = dataset_dict["spatiotemporal_graphs"]
 spatial_graph = dataset_dict["spatial_graph"]
 temporal_graph = dataset_dict["temporal_graph"]
 
@@ -132,6 +148,11 @@ initial_guess = torch.ones(N) * data.mean()
 model = SpatiotemporalInference(config, initial_guess, data, joint_mask,
                                 spatial_graph.to_dict(), temporal_graph.to_dict(), T=T, gt=dataset_dict.get('gt', None),
                                 data_mean=dataset_dict.get('data_mean', 0), data_std=dataset_dict.get('data_std', 1))
+
+
+for param_name, param_value in model.dgmrf.state_dict().items():
+    print("{}: {}".format(param_name, param_value))
+
 # samples = model.vi_dist.sample()
 # print(samples.size())
 # log_det = model.vi_dist.log_det()
@@ -177,23 +198,37 @@ if ("true_posterior_mean" in dataset_dict) and ("gt" in dataset_dict):
     inference_callback = LatticeInferenceCallback(wandb_logger, config, dataset_dict['grid_size'],
                                                   true_mean, true_std, residuals)
 else:
-    tidx = 3
+    tidx = 0
     # G_t = graphs.get_example(tidx)
     # G_t = ptg.data.Data(edge_index=G_t["latent", "spatial", "latent"].edge_index,
     #                     num_nodes=G_t["latent"].num_nodes,
     #                     mask=G_t["latent"].mask,
     #                     pos=G_t["latent"].pos)
 
-    val_nodes = dataset_dict['val_nodes']
-    ridx = torch.randperm(len(val_nodes))[:4]
-    val_nodes = val_nodes[ridx].cpu()
-    train_nodes = dataset_dict['train_nodes']
-    ridx = torch.randperm(len(train_nodes))[:4]
-    train_nodes = train_nodes[ridx].cpu()
+    val_nodes = dataset_dict['val_nodes'].cpu()
+    # ridx = torch.randperm(len(val_nodes))[:4]
+    # val_nodes = val_nodes[5:10].cpu()
+    train_nodes = dataset_dict['train_nodes'].cpu()
+    test_nodes = dataset_dict['test_nodes'].cpu()
+    # ridx = torch.randperm(len(train_nodes))[:4]
+    # train_nodes = train_nodes[5:10].cpu()
     # val_nodes = [892, 893, 785, 784]
     # train_nodes = [891, 960, 789, 770]
 
-    inference_callback = GraphInferenceCallback(wandb_logger, config, temporal_graph, tidx, val_nodes, train_nodes)
+    # zoom in to crossing
+    # lat_max, lat_min, lon_max, lon_min = (37.330741, 37.315718, -121.883005, -121.903327)
+    lat_max, lat_min, lon_max, lon_min = (37.345741, 37.300718, -121.833005, -121.953327)
+    node_mask = (temporal_graph.lat < lat_max) * (temporal_graph.lat > lat_min) * \
+                (temporal_graph.lon < lon_max) * (temporal_graph.lon > lon_min)
+    subset = node_mask.nonzero().squeeze()
+    mark_subset = torch.tensor([idx for idx, i in enumerate(subset) if (i in dataset_dict['train_nodes']
+                                                                     or i in dataset_dict['val_nodes'])])
+    print(f'subset size = {len(subset)}')
+
+    print(temporal_graph)
+
+    inference_callback = GraphInferenceCallback(wandb_logger, config, temporal_graph, tidx,
+                                                val_nodes, train_nodes, test_nodes, subset=subset, mark_subset=mark_subset)
 
 earlystopping_callback = EarlyStopping(monitor="val_rec_loss", mode="min", patience=config["early_stopping_patience"])
 
@@ -212,9 +247,9 @@ def print_params(model, config, header=None):
     if header:
         print(header)
 
-    print("Raw parameters:")
-    for param_name, param_value in model.state_dict().items():
-        print("{}: {}".format(param_name, param_value))
+    # print("Raw parameters:")
+    # for param_name, param_value in model.state_dict().items():
+    #     print("{}: {}".format(param_name, param_value))
 
     print("Aggregation weights:")
     for layer_i, layer in enumerate(model.layers):
@@ -229,11 +264,15 @@ def print_params(model, config, header=None):
             print("degree power: {:.4}".format(layer.degree_power[0].item()))
 
 trainer.fit(model, dl_train, dl_val)
-# print_params(model.dgmrf, config)
-for param_name, param_value in model.dgmrf.state_dict().items():
-    print("{}: {}".format(param_name, param_value))
 trainer.test(model, dl_test)
 
+for param_name, param_value in model.dgmrf.state_dict().items():
+    print("{}: {}".format(param_name, param_value))
+if hasattr(model.dgmrf, 'dgmrf'):
+    print_params(model.dgmrf.dgmrf, config)
+else:
+    print_params(model.dgmrf, config)
+print(f'noise var = {model.noise_var}')
 
 
 # if hasattr(model.dgmrf, 'dynamics'):
