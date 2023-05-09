@@ -8,10 +8,10 @@ import pytorch_lightning as pl
 
 
 
-def new_graph(like_graph, new_x=None):
-    graph = copy.copy(like_graph) # Shallow copy
-    graph.x = new_x
-    return graph
+# def new_graph(like_graph, new_x=None):
+#     graph = copy.copy(like_graph) # Shallow copy
+#     graph.x = new_xt
+#     return graph
 
 def get_num_nodes(edge_index):
     return int(edge_index.max()) + 1 if edge_index.numel() > 0 else 0
@@ -392,19 +392,23 @@ class JointDGMRF(torch.nn.Module):
         self.dgmrf = DGMRF(config, spatial_graph, T=T, shared=shared, weighted=weighted)
 
         if temporal_graph is not None:
-            self.dynamics = TemporalDGMRF(config, spatial_graph, temporal_graph, T=T, shared=shared)
+            self.dynamics = torch.nn.ModuleList([
+                TemporalDGMRF(config, spatial_graph, temporal_graph, T=T, shared=shared)
+                for _ in range(config.get('n_layers_temporal', 1))])
 
     def forward(self, x, transpose=False, with_bias=True, **kwargs):
         # x has shape [num_samples, T, num_nodes]
         if hasattr(self, 'dynamics') and not transpose:
-            x = self.dynamics(x, with_bias=with_bias, v=kwargs.get('v', None))
+            for layer in self.dynamics:
+                x = layer(x, with_bias=with_bias, v=kwargs.get('v', None))
 
         # z = [self.dgmrf_list[i](x[:, ti], transpose, with_bias) for i, ti in enumerate(self.time_intervals)]
         # z = torch.cat(z, dim=1)  # shape [num_samples, T, num_nodes]
         z = self.dgmrf(x, transpose, with_bias)
 
         if hasattr(self, 'dynamics') and transpose:
-            z = self.dynamics(z, transpose=True, with_bias=with_bias, v=kwargs.get('v', None))
+            for layer in reversed(self.dynamics):
+                z = layer(z, transpose=True, with_bias=with_bias, v=kwargs.get('v', None))
 
         return z
 
@@ -421,7 +425,7 @@ class DirectedDiffusionModel(ptg.nn.MessagePassing):
     """
 
     def __init__(self, config, graph):
-        super(DiffusionModel, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
+        super(DirectedDiffusionModel, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
 
         self.K = config.get('diff_K', 1)
         print(f'K = {self.K}')
@@ -483,7 +487,7 @@ class DirectedDiffusionModel(ptg.nn.MessagePassing):
 
         # msg = self.diff_coef * (x_j - x_i)
         # TODO: adjust if graph has edge weights
-        return edge_weight.reshape(1, 1, 1, -1) * torch.stack([x_i, x_j], dim=0)
+        return edge_weight * torch.stack([x_i, x_j], dim=0)
 
 class DiffusionModel(ptg.nn.MessagePassing):
     """
@@ -542,7 +546,8 @@ class DiffusionModel(ptg.nn.MessagePassing):
 
     def message(self, x_i, x_j, edge_weight):
         # construct messages to node i for each edge (j,i)
-        return edge_weight.reshape(1, 1, 1, -1) * torch.stack([x_i, x_j], dim=0)
+        return edge_weight * torch.stack([x_i, x_j], dim=0)
+
 
 class FlowModel(ptg.nn.MessagePassing):
     """
@@ -840,14 +845,22 @@ class AdvectionModel(ptg.nn.MessagePassing):
 class TemporalDGMRF(torch.nn.Module):
     def __init__(self, config, spatial_graph, temporal_graph, **kwargs):
         super().__init__()
-        self.transition_type = config.get('transition_type', 'identity')
-        self.n_transitions = config.get('n_transitions', 1)
 
+        self.vi_layer = kwargs.get('vi_layer', False)
+        if self.vi_layer:
+            self.transition_type = config.get('vi_transition_type', 'identity')
+        else:
+            self.transition_type = config.get('transition_type', 'identity')
+
+        self.n_transitions = config.get('n_transitions', 1)
         self.shared_dynamics = kwargs.get('shared', 'dynamics')
 
         # setup transition model
         if self.transition_type == 'diffusion':
             self.transition_models = torch.nn.ModuleList([DiffusionModel(config, temporal_graph)
+                                                          for _ in range(self.n_transitions)])
+        elif self.transition_type == 'directed_diffusion':
+            self.transition_models = torch.nn.ModuleList([DirectedDiffusionModel(config, temporal_graph)
                                                           for _ in range(self.n_transitions)])
         elif self.transition_type == 'advection':
             self.transition_models = torch.nn.ModuleList([AdvectionModel(config, temporal_graph)
@@ -867,11 +880,12 @@ class TemporalDGMRF(torch.nn.Module):
         elif self.transition_type == 'flow':
             self.transition_models = torch.nn.ModuleList([FlowModel(config, temporal_graph)
                                                           for _ in range(self.n_transitions)])
-        elif self.transition_type == "AR":
+        else: # self.transition_type == "AR":
             T = 1 if self.shared_dynamics == 'dynamics' else (kwargs.get('T', 2) - 1)
             self.transition_models = torch.nn.ModuleList([ARModelMultiChannel(T=T) for _ in range(self.n_transitions)])
 
-        if kwargs.get('use_dynamics_bias', True):
+        if kwargs.get('use_dynamics_bias', True) and not self.vi_layer:
+            print('use dynamics bias')
             if self.shared_dynamics:
                 self.bias = torch.nn.parameter.Parameter(torch.rand(1,))
             else:
@@ -885,13 +899,16 @@ class TemporalDGMRF(torch.nn.Module):
 
         if transpose:
             states = x[:, 1:]
+            layers = reversed(self.transition_models)
+
         else:
             states = x[:, :-1]
+            layers = self.transition_models
 
         if with_bias:
             states = states + self.bias.reshape(1, -1, 1)
 
-        for l in range(self.n_transitions):
+        for layer in layers:
             # TODO: use different parameters for each transition layer?
             # TODO: if so, order needs to be reversed for transpose model
             if hasattr(self, 'transition_models'):
@@ -899,7 +916,7 @@ class TemporalDGMRF(torch.nn.Module):
                 #     v = kwargs.get('v').unsqueeze(2).repeat(1, 1, states.size(1), 1)  # shape [2, n_samples, T-1, num_nodes]
                 #     states = self.transition_model(states, v=v, transpose=transpose)
                 # else:
-                states = self.transition_models[l](states, transpose=transpose)
+                states = layer(states, transpose=transpose)
 
             # if with_bias:
             #     states = states + self.bias
@@ -1005,7 +1022,7 @@ class TemporalDGMRF(torch.nn.Module):
 
 
 class VariationalDist(torch.nn.Module):
-    def __init__(self, config, graph, initial_guess, T=1, shared='all'):
+    def __init__(self, config, graph, initial_guess, temporal_graph=None, T=1, shared='all'):
         super().__init__()
 
         # Dimensionality of distribution (num_nodes of graph)
@@ -1031,8 +1048,11 @@ class VariationalDist(torch.nn.Module):
         self.layers = torch.nn.ModuleList([DGMRFLayerMultiChannel(config, graph, T=T, shared=shared, vi_layer=True,
                                                                   weighted=config.get('weighted_vi', False))
                             for _ in range(config["vi_layers"])])
-        # self.layers = torch.nn.ModuleList([DGMRFLayer(graph, config, vi_layer=True)
-        #                                    for _ in range(config["vi_layers"])])
+
+        if temporal_graph is not None:
+            self.dynamics = TemporalDGMRF(config, graph, temporal_graph, T=T, shared=shared, vi_layer=True)
+
+
         if config["vi_layers"] > 0:
             # self.post_diag_param = torch.nn.parameter.Parameter(
             #     2*torch.rand(self.dim) - 1.)
@@ -1072,13 +1092,16 @@ class VariationalDist(torch.nn.Module):
         standard_sample = torch.randn(self.n_samples, self.T, self.dim)
         samples = self.std * standard_sample # [T, dim] * [samples, T, dim]
 
+        if hasattr(self, 'dynamics'):
+            samples = self.dynamics(samples, with_bias=False)
+
         for layer in self.layers:
             propagated = layer(samples, transpose=False, with_bias=False)
             samples = propagated
 
         if self.layers:
             # Apply post diagonal matrix
-            samples  = self.post_diag.unsqueeze(0) * samples # [1, T, dim] * [samples, T, dim]
+            samples = self.post_diag.unsqueeze(0) * samples # [1, T, dim] * [samples, T, dim]
         samples = samples + self.mean_param.unsqueeze(0) # [samples, T, dim] + [1, T, dim]
         return samples # shape (n_samples, T, dim)
 
@@ -1200,7 +1223,7 @@ class SpatiotemporalInference(pl.LightningModule):
         # self.mask = graphs["latent"].mask
         self.y = data
         self.mask = joint_mask # shape [T * num_nodes]
-        self.y_masked = torch.ones(self.mask.size(), dtype=self.y.dtype) * np.nan
+        self.y_masked = torch.zeros(self.mask.size(), dtype=self.y.dtype) #* np.nan
         self.y_masked[self.mask] = self.y
 
         # self.pos = graphs.get_example(0)["latent"].pos
@@ -1278,8 +1301,12 @@ class SpatiotemporalInference(pl.LightningModule):
             shared_vi = 'all'
 
         # shared_vi = "all"
-        self.vi_dist = VariationalDist(config, spatial_graph, initial_guess.reshape(self.T, -1),
-                                       T=self.T, shared=shared_vi)
+        if config.get('use_vi_dynamics', False):
+            self.vi_dist = VariationalDist(config, spatial_graph, initial_guess.reshape(self.T, -1),
+                                           temporal_graph=temporal_graph, T=self.T, shared=shared_vi)
+        else:
+            self.vi_dist = VariationalDist(config, spatial_graph, initial_guess.reshape(self.T, -1),
+                                           T=self.T, shared=shared_vi)
 
         # self.obs_model = ObservationModel(graphs["latent", "observation", "data"], self.N)
         self.obs_model = lambda x: x[:, self.mask]
@@ -1339,6 +1366,9 @@ class SpatiotemporalInference(pl.LightningModule):
     def training_step(self, training_index):
         #training_mask = batch['training_mask']
 
+        self.train_mask = torch.zeros_like(self.mask)
+        self.train_mask[self.mask.nonzero()[training_index.squeeze()]] = 1
+
         # sample from variational distribution
         samples = self.vi_dist.sample()  # shape [n_samples, T, num_nodes]
         # N = samples.size(-1) * samples.size(-2)
@@ -1385,27 +1415,31 @@ class SpatiotemporalInference(pl.LightningModule):
 
     def test_step(self, test_index, *args):
         # posterior inference using variational distribution
-        vi_mean, vi_std = self.vi_dist.posterior_estimate(self.noise_var)
-        mean = vi_mean.flatten()
-        std = vi_std.flatten()
+        self.vi_mean, self.vi_std = self.vi_dist.posterior_estimate(self.noise_var)
+        mean = self.vi_mean.flatten()
+        std = self.vi_std.flatten()
 
-        data = torch.zeros(self.mask.size(), dtype=self.y.dtype)
-        data[self.mask] = self.y # use self.y_masked?
-        # TODO: fix CG (dist becomes negative)
+        # data = torch.zeros(self.mask.size(), dtype=self.y.dtype)
+        # data[self.mask] = self.y
 
-        # cg_mean = posterior_mean(self.dgmrf, data.reshape(1, *self.input_shape),
-        #                            self.mask, self.config, self.noise_var, initial_guess=vi_mean)
+        y_masked = torch.zeros_like(self.y_masked)
+        y_masked[self.train_mask] = self.y_masked[self.train_mask]
 
-        cg_mean, cg_std = posterior_inference(self.dgmrf, data.reshape(1, *self.input_shape),
-                                              self.mask, self.config, self.noise_var)#, initial_guess=vi_mean)
+        self.cg_mean, self.cg_std = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
+                                                        self.train_mask, self.config,
+                                                        self.noise_var)  # , initial_guess=vi_mean)
+
+
 
         if hasattr(self, 'gt'):
             # use unobserved nodes to evaluate predictions
             # test_index indexes latent space
+
+
             test_mask = torch.logical_not(self.mask)
             gt_mean = self.gt[test_mask]# * self.data_std + self.data_mean
             residuals_vi = (self.gt[test_mask] - mean[test_mask])# * self.data_std + self.data_mean
-            residuals_cg = (self.gt[test_mask] - cg_mean[test_mask])# * self.data_std + self.data_mean
+            residuals_cg = (self.gt[test_mask] - self.cg_mean[test_mask])# * self.data_std + self.data_mean
 
             self.log("test_mae_vi", residuals_vi.abs().mean().item(), sync_dist=True)
             self.log("test_rmse_vi", torch.pow(residuals_vi, 2).mean().sqrt().item(), sync_dist=True)
@@ -1424,8 +1458,8 @@ class SpatiotemporalInference(pl.LightningModule):
             self.log("test_crps_vi", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
             self.log("test_int_score_vi", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
 
-            pred_mean_np = cg_mean[test_mask].cpu().numpy()
-            pred_std_np = cg_std[test_mask].cpu().numpy()
+            pred_mean_np = self.cg_mean[test_mask].cpu().numpy()
+            pred_std_np = self.cg_std[test_mask].cpu().numpy()
             target_np = self.gt[test_mask].cpu().numpy()
 
             self.log("test_crps_cg", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
@@ -1434,12 +1468,15 @@ class SpatiotemporalInference(pl.LightningModule):
         else:
             # use held out part of data to evaluate predictions
             # test_index indexes data space
+            data = self.y[test_index]
+
             masked_mean = self.obs_model(mean.unsqueeze(0)).squeeze(0)
             masked_std = self.obs_model(std.unsqueeze(0)).squeeze(0)
-            masked_mean_cg = self.obs_model(cg_mean.unsqueeze(0)).squeeze(0)
-            data = self.y[test_index]# * self.data_std + self.data_mean
-            residuals_vi = (self.y[test_index] - masked_mean[test_index])# * self.data_std + self.data_mean
-            residuals_cg = (self.y[test_index] - masked_mean_cg[test_index])# * self.data_std + self.data_mean
+            masked_mean_cg = self.obs_model(self.cg_mean.unsqueeze(0)).squeeze(0)
+            masked_std_cg = self.obs_model(self.cg_std.unsqueeze(0)).squeeze(0)
+
+            residuals_vi = (self.y[test_index] - masked_mean[test_index])
+            residuals_cg = (self.y[test_index] - masked_mean_cg[test_index])
 
             self.log("test_mae_vi", residuals_vi.abs().mean().item(), sync_dist=True)
             self.log("test_rmse_vi", torch.pow(residuals_vi, 2).mean().sqrt().item(), sync_dist=True)
@@ -1450,12 +1487,39 @@ class SpatiotemporalInference(pl.LightningModule):
             self.log("test_mape_cg", (residuals_cg / data).abs().mean().item(), sync_dist=True)
 
             # TODO: std from posterior_estimate can't be used as is, or can it??
-            pred_mean_np = masked_mean[test_index].cpu().numpy()
-            pred_std_np = masked_std[test_index].cpu().numpy()
+            pred_mean_np = masked_mean_cg[test_index].cpu().numpy()
+            pred_std_np = masked_std_cg[test_index].cpu().numpy()
             target_np = self.y[test_index].cpu().numpy()
 
-            self.log("test_crps", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
-            self.log("test_int_score", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+            self.log("test_crps_cg", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+            self.log("test_int_score_cg", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+
+
+    def predict_step(self, *args):
+
+        y_masked = torch.zeros_like(self.y_masked)
+        y_masked[self.train_mask] = self.y_masked[self.train_mask]
+
+        if not (hasattr(self, 'vi_mean') or hasattr(self, 'vi_std')):
+            self.vi_mean, self.vi_std = self.vi_dist.posterior_estimate(self.noise_var)
+
+        if not (hasattr(self, 'cg_mean') or hasattr(self, 'cg_std')):
+            self.cg_mean, self.cg_std = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
+                                                            self.train_mask, self.config,
+                                                            self.noise_var)  # , initial_guess=vi_mean)
+
+        if not hasattr(self, 'cg_samples'):
+            self.cg_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
+                                    self.train_mask, self.config, self.noise_var)
+
+        return {'cg_mean': self.cg_mean.reshape(self.T, self.num_nodes),
+                'cg_std': self.cg_std.reshape(self.T, self.num_nodes),
+                'cg_samples': self.cg_samples.reshape(-1, self.T, self.num_nodes),
+                'vi_mean': self.vi_mean,
+                'vi_std':  self.vi_std,
+                'data': self.y_masked,
+                'gt': self.gt if hasattr(self, 'gt') else 'NA'}
+
 
 
     def configure_optimizers(self):

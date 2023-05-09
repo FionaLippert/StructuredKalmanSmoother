@@ -1,0 +1,45 @@
+# main config file
+output_dir: results
+#dataset: pems_start=0_end=215
+data_dir: /home/flipper/StructuredKalmanSmoother/datasets
+#dataset: spatiotemporal_30x30_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_block=True_0
+dataset: pems_start=0_end=215_AvgFlow
+experiment: testing
+
+#defaults:
+#  - model: time_invariant_dgmrf
+noise_std: 0.1
+learn_noise_std: false
+n_layers: 1
+n_transitions: 0
+non_linear: false
+fix_gamma: false
+gamma_value: 1
+log_det_method: eigvals
+use_bias: true
+use_dynamics_bias: true
+n_training_samples: 10
+n_post_samples: 100
+vi_layers: 1
+features: false
+
+use_dynamics: false
+use_vi_dynamics: false
+independent_time: false
+use_hierarchy: false
+transition_type: none
+n_layers_temporal: 1
+vi_transition_type: AR
+
+weighted_dgmrf: false
+weighted_vi: false
+
+seed: 0
+optimizer: adam
+lr: 0.01
+val_interval: 100
+n_iterations: 5000
+inference_rtol: 1e-7
+max_cg_iter: 500
+device: gpu
+early_stopping_patience: 100

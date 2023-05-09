@@ -9,7 +9,8 @@ import torch
 import torch_geometric as ptg
 import stripy
 
-VARNAMES = {'2m_temperature' : 't2m'}
+VARNAMES = {'2m_temperature' : 't2m',
+            'soil_temperature_level_3': 'st3'}
 
 def lonlat2local(lon, lat):
         pts_lonlat = gpd.GeoSeries([geometry.Point(point) for point in zip(lon, lat)], crs=f'epsg:4326')
@@ -45,7 +46,7 @@ def load(data_dir, variable='2m_temperature'):
         grid_res = 1
         resolution = [grid_res, grid_res]
 
-        info = { 'year' : 2020,
+        info = { 'year' : 2022,
                  'month' : months,
                  'day' : days,
                  'area': bounds,
@@ -53,7 +54,8 @@ def load(data_dir, variable='2m_temperature'):
                  'time' : time }
 
         config.update(info)
-        cds.retrieve('reanalysis-era5-single-levels', config, fp)
+        # cds.retrieve('reanalysis-era5-single-levels', config, fp)
+        cds.retrieve('reanalysis-era5-land', config, fp)
 
     # load .nc file and extract relevant information
     data = xr.open_dataset(fp)

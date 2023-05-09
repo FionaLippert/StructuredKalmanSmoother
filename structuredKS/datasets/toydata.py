@@ -34,6 +34,31 @@ def generate_observations(states, noise_std, obs_ratio):
 
     return data, H
 
+def generate_block_observations(states, noise_std, obs_ratio, grid_size, t):
+
+    if t > 2 and t <= 12:
+        n_obs = int(obs_ratio * states.size(0))
+        n_masked = states.size(0) - n_obs
+        square_size = int(np.sqrt(n_masked))
+
+        # posx, posy = torch.randint(0, grid_size - square_size, (2,))
+        posx, posy = 5, 5
+
+        mask = torch.ones(grid_size, grid_size)
+        mask[posx : posx + square_size, posy : posy + square_size] = 0
+        # mask[-posx: -posx - square_size, -posy: -posy - square_size] = 0
+
+        jdx = mask.flatten().nonzero().squeeze()
+        H = torch.eye(states.size(0))
+        H = H[jdx, :]
+    else:
+        H = torch.eye(states.size(0))
+
+    noise = noise_std * torch.randn(states.size())
+    data = states + noise
+
+    return data, H
+
 def get_mask(H):
     return H.sum(0).bool()
 
@@ -129,7 +154,7 @@ def construct_joint_G(initial_G, transition_G, T):
 
 
 def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.01, obs_ratio=0.8,
-                  transition_noise_std=0.1, seed=0, n_transitions=1, k_max=2):
+                  transition_noise_std=0.1, seed=0, n_transitions=1, k_max=2, block_obs=True):
     # set seed for reproducibility
     torch.manual_seed(seed)
 
@@ -153,9 +178,16 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
     P_0 = Matrn_G(L, 1, 0, 1)
     print(f'P0 = {P_0}')
 
+    # if source:
+    #     loc = torch.tensor([grid_size / 2, grid_size / 2])
+    #     size = grid_size / 5
+    #     strength = 1
+    #     s_mask = ((node_pos - loc).pow(2).sum(-1) <= size)
+    #     s_t = strength * s_mask
+
     if T > 1:
         # P_t = torch.eye(N) / transition_noise_std
-        P_t = torch.eye(N) / transition_noise_std - adj
+        P_t = (torch.eye(N) / transition_noise_std - adj)
 
         # only remove self loops if not diagonal??
         transition_edges, _ = ptg.utils.dense_to_sparse(P_t)
@@ -232,9 +264,14 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
             states_t = mean[:N] + initial_noise_distr.sample()
         else:
             states_t = F @ states_t + transition_noise_distr.sample()
+        # if source:
+        #     states_t += s_t
 
         # generate observations
-        data_t, H_t = generate_observations(states_t, obs_noise_std, obs_ratio)
+        if block_obs:
+            data_t, H_t = generate_block_observations(states_t, obs_noise_std, obs_ratio, grid_size, t)
+        else:
+            data_t, H_t = generate_observations(states_t, obs_noise_std, obs_ratio)
         y_t = mask_observations(data_t, H_t)
         mask_t = get_mask(H_t)
         observation_edges = H_t.to_sparse().coalesce().indices()
@@ -319,9 +356,9 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
 
 
     # test CG method
-    mean_hat = cg_solve(posterior_eta, posterior_prec, rtol=1e-7)
-    eigvals = spl.eigvals(posterior_prec).real
-    print(f'condition number = {eigvals.max() / eigvals.min()}')
+    # mean_hat = cg_solve(posterior_eta, posterior_prec, rtol=1e-7)
+    # eigvals = spl.eigvals(posterior_prec).real
+    # print(f'condition number = {eigvals.max() / eigvals.min()}')
 
     data_dict = {
             "spatial_graph": spatial_graph,
@@ -330,7 +367,7 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
             "gt": states,
             "masks": mask.reshape(T, -1),
             "true_posterior_mean": posterior_mean,
-            "cg_posterior_mean": mean_hat,
+            # "cg_posterior_mean": mean_hat,
             "true_posterior_std": posterior_std,
             "spatial_graphs": spatial_graphs,
             "spatiotemporal_graphs": spatiotemporal_graphs,
@@ -376,15 +413,32 @@ def time_func(func, *inputs):
     return output
 
 
-def plot_spatiotemporal(graphs, save_to=''):
+def plot_spatiotemporal(graphs, plot_data=False, save_to=''):
     T = len(graphs)
     fig, ax = plt.subplots(1, T, figsize=(T * 8, 8))
-    vmin = min([g['latent'].x.min() for g in graphs])
-    vmax = max([g['latent'].x.max() for g in graphs])
+
+    grid_size = graphs['latent'].grid_size[0]
+
+    if plot_data:
+        mask = torch.logical_not(graphs['latent'].mask)
+        values = graphs['latent'].y
+        values[mask] = np.nan
+        name = 'observations'
+    else:
+        values = graphs['latent'].x
+        name = 'latent_states'
+
+    values = values.reshape(T, grid_size, grid_size)
+
+    vmin = np.nanmin(values)
+    vmax = np.nanmax(values)
+
+    # vmin = min([g['latent'].x.min() for g in graphs])
+    # vmax = max([g['latent'].x.max() for g in graphs])
     for t in range(T):
-        graph = graphs[t]['latent']
-        x_t = graph.x.reshape(graph.grid_size, graph.grid_size)
-        img = ax[t].imshow(x_t, vmin=vmin, vmax=vmax)
+        # graph = graphs[t]['latent']
+        # x_t = graph.x.reshape(graph.grid_size, graph.grid_size)
+        img = ax[t].imshow(values[t], vmin=vmin, vmax=vmax)
         ax[t].axis('off')
         ax[t].set_title(f't = {t}', fontsize=30)
 
@@ -392,7 +446,7 @@ def plot_spatiotemporal(graphs, save_to=''):
     cbar.ax.tick_params(labelsize=20)
 
     if os.path.isdir(save_to):
-        fig.savefig(os.path.join(save_to, f'latent_states.png'), bbox_inches='tight')
+        fig.savefig(os.path.join(save_to, f'{name}.png'), bbox_inches='tight')
 
 def plot_spatial(graph, save_to=''):
     fig, ax = plt.subplots(figsize=(8, 8))

@@ -32,6 +32,7 @@ parser.add_argument("--n_transitions", type=int, default=4,
         help="number of transitions per time step in the state space model")
 parser.add_argument("--k_max", type=int, default=1,
         help="number of terms to use to approximate matrix exponential")
+parser.add_argument("--block_mask", default=False, action='store_true', help="Use block mask instead of random mask")
 parser.add_argument("--data_split", type=list, default=0.9, help="fraction of data to use for training, "
                                                                  "the rest is used for validation")
 
@@ -46,7 +47,7 @@ T = args.time_steps
 # generate data
 data = toydata.generate_data(args.grid_size, T, diffusion=args.diff, advection=args.advection,
                              obs_noise_std=args.obs_noise_std, obs_ratio=args.obs_ratio, seed=args.seed,
-                             n_transitions=args.n_transitions)
+                             n_transitions=args.n_transitions, block_obs=True)
 
 # fig, ax = plt.subplots(1, 2, figsize=(8, 4))
 # v = data['velocities'].reshape(2, args.grid_size, args.grid_size)
@@ -57,28 +58,29 @@ data = toydata.generate_data(args.grid_size, T, diffusion=args.diff, advection=a
 # fig.savefig(os.path.join(raw_data_dir, f'velocities.png'), bbox_inches='tight')
 
 # plotting
-graph_list = data["spatiotemporal_graphs"].to_data_list()
+graph_list = data["spatiotemporal_graphs"] #.to_data_list()
 if T > 1:
     toydata.plot_spatiotemporal(graph_list, save_to=raw_data_dir)
+    toydata.plot_spatiotemporal(graph_list, plot_data=True, save_to=raw_data_dir)
 else:
-    toydata.plot_spatial(graph_list[0], save_to=raw_data_dir)
+    toydata.plot_spatial(graph_list.to_data_list()[0], save_to=raw_data_dir)
 
 
-cg_mean = data["cg_posterior_mean"]
-fig, ax = plt.subplots(1, T, figsize=(T * 8, 8))
-vmin = cg_mean.min()
-vmax = cg_mean.max()
-cg_mean = cg_mean.reshape(T, args.grid_size, args.grid_size)
-for t in range(T):
-    img = ax[t].imshow(cg_mean[t], vmin=vmin, vmax=vmax)
-    ax[t].axis('off')
-    ax[t].set_title(f't = {t}', fontsize=30)
+# cg_mean = data["cg_posterior_mean"]
+# fig, ax = plt.subplots(1, T, figsize=(T * 8, 8))
+# vmin = cg_mean.min()
+# vmax = cg_mean.max()
+# cg_mean = cg_mean.reshape(T, args.grid_size, args.grid_size)
+# for t in range(T):
+#     img = ax[t].imshow(cg_mean[t], vmin=vmin, vmax=vmax)
+#     ax[t].axis('off')
+#     ax[t].set_title(f't = {t}', fontsize=30)
+#
+# cbar = fig.colorbar(img, ax=ax, shrink=0.6, aspect=10)
+# cbar.ax.tick_params(labelsize=20)
 
-cbar = fig.colorbar(img, ax=ax, shrink=0.6, aspect=10)
-cbar.ax.tick_params(labelsize=20)
 
-
-fig.savefig(os.path.join(raw_data_dir, f'cg_mean.png'), bbox_inches='tight')
+# fig.savefig(os.path.join(raw_data_dir, f'cg_mean.png'), bbox_inches='tight')
 
 #
 # def save_graph_ds(save_dict, args, ds_name):
@@ -139,6 +141,6 @@ data['grid_size'] = torch.tensor([args.grid_size, args.grid_size])
 
 # save graph
 ds_name = f'spatiotemporal_{args.grid_size}x{args.grid_size}_obs={args.obs_ratio}_' \
-          f'T={T}_diff={args.diff}_adv={args.advection}_ntrans={args.n_transitions}_{args.seed}'
+          f'T={T}_diff={args.diff}_adv={args.advection}_ntrans={args.n_transitions}_block={args.block_mask}_{args.seed}'
 print(f'Saving dataset {ds_name}')
 utils.save_graph_ds(data, args, ds_name)
