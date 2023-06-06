@@ -74,6 +74,13 @@ def run_dgmrf(config: DictConfig):
     N = masks.numel()
     T = masks.size(0)
 
+    val_nodes = dataset_dict["val_masks"].sum(0).nonzero().squeeze()
+    test_nodes = dataset_dict["test_masks"].sum(0).nonzero().squeeze()
+
+    val_nodes = val_nodes[~torch.isin(val_nodes, test_nodes)]
+    val_nodes = val_nodes[torch.randperm(val_nodes.numel())[:5]]
+    test_nodes = test_nodes[torch.randperm(test_nodes.numel())[:5]]
+
     print(f'initial guess = {data.mean()}')
     initial_guess = torch.ones(N) * data.mean()
 
@@ -87,12 +94,17 @@ def run_dgmrf(config: DictConfig):
 
 
     # dataloaders contain data masks defining which observations to use for training, validation, testing
-    ds_train = DummyDataset(dataset_dict['train_idx'], config["val_interval"])
-    ds_val = DummyDataset(dataset_dict['val_idx'], 1)
-    ds_test = DummyDataset(dataset_dict['test_idx'], 1)
+    # ds_train = DummyDataset(dataset_dict['train_idx'], config["val_interval"])
+    # ds_val = DummyDataset(dataset_dict['val_idx'], 1)
+    # ds_test = DummyDataset(dataset_dict['test_idx'], 1)
+
+    ds_train = DummyDataset(dataset_dict['train_masks'].reshape(-1), config["val_interval"])
+    ds_val = DummyDataset(dataset_dict['val_masks'].reshape(-1), 1)
+    ds_test = DummyDataset(dataset_dict['test_masks'].reshape(-1), 1)
+
     dl_train = DataLoader(ds_train, batch_size=1, shuffle=False)
     dl_val = DataLoader(ds_val, batch_size=1, shuffle=False)
-    dl_test = DataLoader(ds_val, batch_size=1, shuffle=False)
+    dl_test = DataLoader(ds_test, batch_size=1, shuffle=False)
 
     wandb_logger = WandbLogger(log_model='all')
     # log_predictions_callback = LogPredictionsCallback(wandb_logger, t=1)
@@ -115,35 +127,45 @@ def run_dgmrf(config: DictConfig):
         inference_callback = LatticeInferenceCallback(wandb_logger, config, dataset_dict['grid_size'],
                                                       true_mean, true_std, residuals)
     else:
-        tidx = 0
+        tidx = T // 2
 
-        val_nodes = dataset_dict['val_nodes'].cpu()
+        # val_nodes = dataset_dict['val_nodes'].cpu()
         # ridx = torch.randperm(len(val_nodes))[:4]
         # val_nodes = val_nodes[5:10].cpu()
-        train_nodes = dataset_dict['train_nodes'].cpu()
-        print(train_nodes)
-        test_nodes = dataset_dict['test_nodes'].cpu()
+        # train_nodes = dataset_dict['train_nodes'].cpu()
+        # print(train_nodes)
+        # test_nodes = dataset_dict['test_nodes'].cpu()
         # ridx = torch.randperm(len(train_nodes))[:4]
         # train_nodes = train_nodes[5:10].cpu()
         # val_nodes = [892, 893, 785, 784]
         # train_nodes = [891, 960, 789, 770]
 
-        # zoom in to crossing
-        lat_max, lat_min, lon_max, lon_min = (37.330741, 37.315718, -121.883005, -121.903327)
-        # lat_max, lat_min, lon_max, lon_min = (37.345741, 37.300718, -121.833005, -121.953327)
-        node_mask = (temporal_graph.lat < lat_max) * (temporal_graph.lat > lat_min) * \
-                    (temporal_graph.lon < lon_max) * (temporal_graph.lon > lon_min)
-        subset = node_mask.nonzero().squeeze()
-        mark_subset = torch.tensor([idx for idx, i in enumerate(subset) if (i in dataset_dict['train_nodes']
-                                                                         or i in dataset_dict['val_nodes'])])
-        print(f'subset size = {len(subset)}')
-        print(f'test nodes = {test_nodes}')
-        print(f'train nodes = {train_nodes}')
+        # val_nodes = dataset_dict["val_masks"].sum(0).nonzero().squeeze()
+        # train_nodes = dataset_dict["train_masks"].sum(0).nonzero().squeeze().cpu()
+        # test_nodes = dataset_dict["test_masks"].sum(0).nonzero().squeeze()
 
-        print(temporal_graph)
+        # zoom in to crossing
+        # lat_max, lat_min, lon_max, lon_min = (37.330741, 37.315718, -121.883005, -121.903327)
+        # # lat_max, lat_min, lon_max, lon_min = (37.345741, 37.300718, -121.833005, -121.953327)
+        # node_mask = (temporal_graph.lat < lat_max) * (temporal_graph.lat > lat_min) * \
+        #             (temporal_graph.lon < lon_max) * (temporal_graph.lon > lon_min)
+        # subset = node_mask.nonzero().squeeze()
+        # mark_subset = torch.tensor([idx for idx, i in enumerate(subset) if (i in dataset_dict['train_nodes']
+        #                                                                  or i in dataset_dict['val_nodes'])])
+        # print(f'subset size = {len(subset)}')
+        # print(f'test nodes = {test_nodes}')
+        # print(f'train nodes = {train_nodes}')
+
+        # subset = torch.cat([val_nodes[torch.randperm(val_nodes.numel())[:5]],
+        #                     test_nodes[torch.randperm(test_nodes.numel())[:5]]], dim=0)
+        # mark_subset = torch.tensor([idx for idx, i in enumerate(subset) if i not in test_nodes])
+
+        # val_nodes = val_nodes[~torch.isin(val_nodes, test_nodes)]
+        # val_nodes = val_nodes[torch.randperm(val_nodes.numel())[:5]]
+        # test_nodes = test_nodes[torch.randperm(test_nodes.numel())[:5]]
 
         inference_callback = GraphInferenceCallback(wandb_logger, config, temporal_graph, tidx,
-                                                    val_nodes, train_nodes, test_nodes, subset=subset, mark_subset=mark_subset)
+                                        test_nodes.cpu(), val_nodes.cpu())#, subset=subset, mark_subset=mark_subset)
 
     earlystopping_callback = EarlyStopping(monitor="val_rec_loss", mode="min", patience=config["early_stopping_patience"])
 

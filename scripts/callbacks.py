@@ -193,7 +193,7 @@ class LatticeInferenceCallback(Callback):
 
 class GraphInferenceCallback(Callback):
 
-    def __init__(self, logger, config, graph_t, tidx, val_nodes, train_nodes, test_nodes, subset=None, mark_subset=None):
+    def __init__(self, logger, config, graph_t, tidx, test_nodes, val_nodes, subset=None, mark_subset=None):
         self.logger = logger
         self.config = config
         self.graph_t = graph_t
@@ -204,23 +204,25 @@ class GraphInferenceCallback(Callback):
         pos = graph_t.pos.cpu()
 
         if subset is not None:
-            self.train_nodes = [i for i in train_nodes if i in subset]
-            self.val_nodes = [i for i in val_nodes if i in subset]
+            # self.train_nodes = [i for i in train_nodes if i in subset]
+            # self.val_nodes = [i for i in val_nodes if i in subset]
+            # self.train_val_nodes = [i for i in subset if i not in test_nodes]
             self.test_nodes = [i for i in test_nodes if i in subset]
+            self.val_nodes = [i for i in val_nodes if i in subset]
             self.all_nodes = subset.cpu()
 
             sub_edges, sub_attr = ptg.utils.subgraph(self.subset, self.graph_t.edge_index,
-                                              edge_attr=self.graph_t.speed_kph, relabel_nodes=True)
+                                              edge_attr=self.graph_t.edge_weight, relabel_nodes=True)
             self.subgraph = ptg.data.Data(edge_index=sub_edges, num_nodes=len(self.subset), edge_attr=sub_attr)
 
             fig, ax = plt.subplots(figsize=(15, 10))
 
             ax.scatter(pos[self.all_nodes, 0], pos[self.all_nodes, 1], alpha=0.1, color='gray', s=10)
-            ax.scatter(pos[self.train_nodes, 0], pos[self.train_nodes, 1], alpha=0.5, color='red', s=10)
+            # ax.scatter(pos[self.train_nodes, 0], pos[self.train_nodes, 1], alpha=0.5, color='red', s=10)
             ax.scatter(pos[self.val_nodes, 0], pos[self.val_nodes, 1], alpha=0.5, color='orange', s=10)
             ax.scatter(pos[self.test_nodes, 0], pos[self.test_nodes, 1], alpha=0.5, color='green', s=10)
-            for idx in self.train_nodes:
-                ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='red')
+            # for idx in self.train_nodes:
+            #     ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='red')
             for idx in self.val_nodes:
                 ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='orange')
             for idx in self.test_nodes:
@@ -234,24 +236,25 @@ class GraphInferenceCallback(Callback):
             self.logger.log_image(key=f'subset_nodes', images=[fig])
         else:
             self.val_nodes = val_nodes
-            self.train_nodes = train_nodes
+            # self.train_nodes = train_nodes
             self.test_nodes = test_nodes
             self.all_nodes = torch.arange(pos.size(0)).cpu()
+            # self.train_val_nodes = [i for i in self.all_nodes if not i in test_nodes]
 
 
 
         fig, ax = plt.subplots(figsize=(15, 10))
         ax.scatter(pos[self.all_nodes, 0], pos[self.all_nodes, 1], alpha=0.1, color='gray', s=2)
-        ax.scatter(pos[self.train_nodes, 0], pos[self.train_nodes, 1], alpha=0.5, color='red', s=8)
+        # ax.scatter(pos[self.train_nodes, 0], pos[self.train_nodes, 1], alpha=0.5, color='red', s=8)
         ax.scatter(pos[self.val_nodes, 0], pos[self.val_nodes, 1], alpha=0.5, color='orange', s=8)
         ax.scatter(pos[self.test_nodes, 0], pos[self.test_nodes, 1], alpha=0.5, color='green', s=8)
-        for idx in self.train_nodes:
-            ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='red')
+        # for idx in self.train_nodes:
+        #     ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='red')
         for idx in self.val_nodes:
             ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='orange')
         for idx in self.test_nodes:
             ax.text(pos[idx, 0], pos[idx, 1], str(int(idx)), fontsize=8, color='green')
-        self.logger.log_image(key='train_val_test_node_map', images=[fig])
+        self.logger.log_image(key='test_node_map', images=[fig])
 
 
 
@@ -276,17 +279,17 @@ class GraphInferenceCallback(Callback):
         self.logger.log_image(key='example_val_timeseries', images=[fig])
         plt.close()
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-        for idx in self.train_nodes: #[:3]:
-            l = ax.plot(vi_mean[:, idx], label=f'node {idx}')
-            ax.fill_between(range(pl_module.T), vi_mean[:, idx] - vi_std[:, idx], vi_mean[:, idx] + vi_std[:, idx],
-                            alpha=0.2, color=l[0].get_color())
-            # for jdx in range(vi_samples.size(0)):
-            #     ax.plot(vi_samples[jdx, :, idx].cpu(), c=l[0].get_color(), alpha=0.1)
-            ax.plot(data[:, idx], '--', c=l[0].get_color(), alpha=0.6)
-        ax.legend()
-        self.logger.log_image(key='example_train_timeseries', images=[fig])
-        plt.close()
+        # fig, ax = plt.subplots(figsize=(10, 6))
+        # for idx in self.train_nodes: #[:3]:
+        #     l = ax.plot(vi_mean[:, idx], label=f'node {idx}')
+        #     ax.fill_between(range(pl_module.T), vi_mean[:, idx] - vi_std[:, idx], vi_mean[:, idx] + vi_std[:, idx],
+        #                     alpha=0.2, color=l[0].get_color())
+        #     # for jdx in range(vi_samples.size(0)):
+        #     #     ax.plot(vi_samples[jdx, :, idx].cpu(), c=l[0].get_color(), alpha=0.1)
+        #     ax.plot(data[:, idx], '--', c=l[0].get_color(), alpha=0.6)
+        # ax.legend()
+        # self.logger.log_image(key='example_train_timeseries', images=[fig])
+        # plt.close()
 
     def on_train_start(self, trainer, pl_module):
 

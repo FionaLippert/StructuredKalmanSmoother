@@ -13,16 +13,17 @@ from structuredKS.models import layers
 class KalmanSmoother:
 
     def __init__(self, initial_mean, initial_cov, transition_model, transition_cov,
-                 observation_model, observation_cov):
+                 observation_models, observation_noise):
 
-        self.initial_mean = initial_mean
-        self.initial_cov = initial_cov
-        self.F = transition_model
-        self.Q = transition_cov
-        self.H = observation_model
-        self.R = observation_cov
+        self.initial_mean = initial_mean # size [batch, state]
+        self.initial_cov = initial_cov # size [batch, state, state]
+        self.F = transition_model # size [batch, state, state]
+        self.Q = transition_cov # size [batch, state, state]
+        self.H = observation_models # size [batch, T, data, state]
+        # self.R = observation_cov # size [batch, data, data]
+        self.sigma_obs = observation_noise # size [batch]
 
-        self.batch_dim, self.data_dim, self.state_dim = self.H.size()
+        self.batch_dim, self.T, self.data_dim, self.state_dim = self.H.size()
 
 
     def EM(self, data, iterations, update=['F', 'Q', 'R', 'mu', 'Sigma']):
@@ -48,11 +49,12 @@ class KalmanSmoother:
                 self.Q = (C - A @ B_inv @ A.transpose(1, 2)) / (T - 1)
             elif 'Q' in update:
                 self.Q = (C - 2 * self.F @ A + self.F @ B @ self.F.transpose(1, 2)) / (T - 1)
-            if 'R' in update: self.R = (error.unsqueeze(-1) @ error.unsqueeze(2) +
-                      self.H.unsqueeze(1) @ cov @ self.H.transpose(1, 2).unsqueeze(1)).mean(1)
+            # if 'R' in update: self.R = (error.unsqueeze(-1) @ error.unsqueeze(2) +
+            #           self.H.unsqueeze(1) @ cov @ self.H.transpose(1, 2).unsqueeze(1)).mean(1)
             if 'mean' in update: self.initial_mean = mean[:, 0]
 
             print(f'new F = {self.F}')
+
             # self.initial_cov = ?
 
     def smoother(self, data):
@@ -75,7 +77,7 @@ class KalmanSmoother:
                 # last filtered state is same as smoothed state
                 mean_s = mean_filtered[:, tidx]
                 cov_s = cov_filtered[:, tidx]
-                cov_lag1 = (torch.eye(self.state_dim) - last_K @ self.H) @ transition @ cov_filtered[:, tidx - 1]
+                cov_lag1 = (torch.eye(self.state_dim) - last_K @ self.H[:, tidx]) @ transition @ cov_filtered[:, tidx - 1]
 
                 C_prev = cov_filtered[:, tidx - 1] @ transition.transpose(1, 2) @ torch.inverse(cov_predicted[:, tidx])
             else:
@@ -128,16 +130,17 @@ class KalmanSmoother:
                 cov_p = (transition @ cov_f @ transition.transpose(1, 2)) + self.Q #.unsqueeze(0)
 
             # Kalman gain
-            K = cov_p @ self.H.transpose(1, 2) @ torch.inverse((self.H @ cov_p @ self.H.transpose(1, 2)) + self.R)
+            K = cov_p @ self.H[:, t].transpose(1, 2) @ torch.inverse((self.H[:, t] @
+                        cov_p @ self.H[:, t].transpose(1, 2)) + self.sigma_obs)
 
             # analysis
 
             #residual = data[:, t] - (self.H @ mean_p.T).T
-            residual = data[:, t].unsqueeze(-1) - self.H @ mean_p.unsqueeze(-1)
+            residual = self.H[:, t] @ (data[:, t].unsqueeze(-1) - mean_p.unsqueeze(-1))
             innovation = K @ residual #.unsqueeze(-1)
             mean_f = mean_p + innovation.squeeze(-1)
 
-            diff = (torch.eye(self.state_dim) - K @ self.H)
+            diff = (torch.eye(self.state_dim) - K @ self.H[:, t])
             cov_f = diff @ cov_p  #@ diff.transpose(1, 2) + K @ self.R @ K.transpose(1, 2)
 
             mean_filtered[:, t] = mean_f

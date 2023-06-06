@@ -18,6 +18,10 @@ def diagonal_transition():
 def asymmetric_transition():
     F = torch.diag(torch.ones(5))
     F[0, 2:4] += torch.ones(2)
+    F[1, 3] = 1
+    F[2, 0] = 1
+    F[3, 4] = 1
+    F[4, 2] = 1
     sparse_pattern = F.to_sparse_coo().coalesce()
     G = layers.StaticTransition(sparse_pattern.indices(), initial_weights=sparse_pattern.values())
 
@@ -27,6 +31,10 @@ def asymmetric_transition():
 def asymmetric_dgmrf_transition():
     F = torch.zeros((5, 5))
     F[0, 2:4] += torch.ones(2)
+    F[1, 3] = 1
+    F[2, 0] = 1
+    F[3, 4] = 1
+    F[4, 2] = 1
     edge_index, _ = tg.utils.dense_to_sparse(F)
     edge_attr = torch.rand(edge_index.size(1), 2)
     G = tg.data.Data(edge_index=edge_index, num_nodes=5, edge_attr=edge_attr)
@@ -103,7 +111,8 @@ config = {
           "independent_time": False,
           "use_hierarchy": False,
           "transition_type": "identity",
-          "inference_rtol": 1e-7
+          "inference_rtol": 1e-7,
+          "max_cg_iter": 500
 }
 
 def test_joint_dgmrf_time_invariant(symmetric_dgmrf_graph):
@@ -168,12 +177,12 @@ def test_CG_nonzero_mean_joint_dgmrf_independent_time(symmetric_dgmrf_graph):
 
     assert torch.allclose(mean.reshape(-1), cg_mean.reshape(-1), rtol=1e-04, atol=1e-7)
 
-def test_CG_nonzero_mean_joint_dgmrf_identity(symmetric_dgmrf_graph, asymmetric_dgmrf_transition):
+def test_CG_nonzero_mean_joint_dgmrf_AR(symmetric_dgmrf_graph, asymmetric_dgmrf_transition):
     F, graph_F = asymmetric_dgmrf_transition
     graph_G, num_nodes = symmetric_dgmrf_graph
     T = 3
 
-    config['transition_type'] = 'identity'
+    config['transition_type'] = 'AR'
     model = dgmrf.JointDGMRF(config, graph_G.to_dict(), graph_F.to_dict(), T=T, shared='dynamics')
 
     mean = torch.rand(1, T, num_nodes)
@@ -219,6 +228,25 @@ def test_CG_nonzero_mean_joint_dgmrf_advection_diffusion(symmetric_dgmrf_graph, 
                          config["inference_rtol"], verbose=True)
 
     assert torch.allclose(mean.reshape(-1), cg_mean.reshape(-1), rtol=1e-04, atol=1e-7)
+
+def test_CG_nonzero_mean_joint_dgmrf_advection_diffusion_2layers(symmetric_dgmrf_graph, asymmetric_dgmrf_transition):
+    F, graph_F = asymmetric_dgmrf_transition
+    graph_G, num_nodes = symmetric_dgmrf_graph
+    T = 3
+
+    config['transition_type'] = 'advection+diffusion'
+    config['n_layers_temporal'] = 2
+    model = dgmrf.JointDGMRF(config, graph_G.to_dict(), graph_F.to_dict(), T=T, shared='dynamics')
+
+    mean = torch.rand(1, T, num_nodes)
+    Gmu = model(mean, with_bias=False)
+    eta = model(Gmu, transpose=True, with_bias=False).reshape(1, -1)
+
+    cg_mean = dgmrf.cg_solve(eta, model, torch.zeros(T * num_nodes), T, config,
+                         config["inference_rtol"], verbose=True)
+
+    assert torch.allclose(mean.reshape(-1), cg_mean.reshape(-1), rtol=1e-04, atol=1e-7)
+
 
 
 def test_joint_dgmrf_independent_time(symmetric_dgmrf_graph):
@@ -297,6 +325,32 @@ def test_joint_dgmrf_advection_diffusion(symmetric_dgmrf_graph, asymmetric_dgmrf
 
     GTx = model(x, transpose=True, with_bias=False)
     xTGTx = x.reshape(1, -1) @ GTx.reshape(-1, 1)
+
+    assert torch.allclose(xTGx, xTGTx)
+
+
+def test_joint_dgmrf_GNNadvection(symmetric_dgmrf_graph, asymmetric_dgmrf_transition):
+    F, graph_F = asymmetric_dgmrf_transition
+    graph_G, num_nodes = symmetric_dgmrf_graph
+    T = 3
+
+
+    time_ranges = [torch.arange(T)]
+    config['transition_type'] = 'GNN_advection'
+    graph_G.pos = torch.rand(graph_F.num_nodes, 2, dtype=torch.float32)
+    graph_F.edge_attr = torch.rand(graph_F.num_edges, 2, dtype=torch.float32)
+    # model = dgmrf.JointDGMRF([graph_G for _ in range(T)], time_ranges, config, graph_F)
+    model = dgmrf.JointDGMRF(config, graph_G.to_dict(), graph_F.to_dict(), T=T, shared='dynamics')
+
+    x = torch.rand(1, T, num_nodes)
+
+    Gx = model(x, with_bias=False)
+    xTGx = x.reshape(1, -1) @ Gx.reshape(-1, 1)
+
+    GTx = model(x, transpose=True, with_bias=False)
+    xTGTx = x.reshape(1, -1) @ GTx.reshape(-1, 1)
+
+    print(xTGx, xTGTx)
 
     assert torch.allclose(xTGx, xTGTx)
 

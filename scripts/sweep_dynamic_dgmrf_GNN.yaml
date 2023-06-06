@@ -1,5 +1,5 @@
 program: test_spdgmrf.py
-name: spatiotemporal_sweep
+name: spatiotemporal_sweep_dynamic_GNN
 command:
   - ${env}
   - ${interpreter}
@@ -13,15 +13,20 @@ parameters:
   seed:
     values: [0, 1, 2, 3, 4]
 #  lr:
-#    values: [0.1, 0.01]
+#    values: [ 0.1, 0.01 ]
   n_layers:
-    values: [1, 2, 3]
+    values: [2]
   use_dynamics:
-    values: [false]
+    values: [true]
   independent_time:
-    values: [false, true]
+    values: [false] #, true]
+  transition_type:
+    values: ["GNN_advection"]
+  n_transitions:
+    values: [1]
   use_vi_dynamics:
-    values: [ false ]
+    values: [ true ]
   dataset:
     values: ['"spatiotemporal_30x30_obs=0.875_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_0"']
+
 

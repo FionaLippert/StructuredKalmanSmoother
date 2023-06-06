@@ -9,32 +9,29 @@ import pyproj
 from matplotlib import pyplot as plt
 # import contextily as cx
 
-# Equirectangular projection
-def project_eqrect(lon, lat):
-    # max_pos = long_lat.max(axis=0)
-    # min_pos = long_lat.min(axis=0)
-
-    lon_min, lon_max = lon.min(), lon.max()
-    lat_min, lat_max = lat.min(), lat.max()
-
-    lon_center = 0.5 * (lon_min + lon_max)
-    lat_center = 0.5 * (lat_min + lat_max)
-
-    # center_point = 0.5*(max_pos + min_pos)
-    # centered_pos = long_lat - center_point
-
-    centered_lon = lon - lon_center
-    centered_lat = lat - lat_center
-
-    # Projection will be maximally correct on center of the map
-    x = centered_lon * np.cos(lat_center * np.pi / 180.)
-    # centered_pos[:,0] *= np.cos(center_point[1]*(np.pi/180.))
-
-
-    y = centered_lat / centered_lat.max()
-    # Rescale to longitude in ~[-1,1]
-    # pos = centered_pos / centered_pos[:,0].max()
-    return x, y
+# # Equirectangular projection
+# def project_eqrect(lon, lat):
+#     # max_pos = long_lat.max(axis=0)
+#     # min_pos = long_lat.min(axis=0)
+#
+#     lon_min, lon_max = lon.min(), lon.max()
+#     lat_min, lat_max = lat.min(), lat.max()
+#
+#     lon_center = 0.5 * (lon_min + lon_max)
+#     lat_center = 0.5 * (lat_min + lat_max)
+#
+#     centered_lon = lon - lon_center
+#     centered_lat = lat - lat_center
+#
+#     # Projection will be maximally correct on center of the map
+#     x = centered_lon * np.cos(lat_center * np.pi / 180.)
+#     # centered_pos[:,0] *= np.cos(center_point[1]*(np.pi/180.))
+#
+#
+#     y = centered_lat / centered_lat.max()
+#     # Rescale to longitude in ~[-1,1]
+#     # pos = centered_pos / centered_pos[:,0].max()
+#     return x, y
 
 
 dir = '../datasets/AirQuality'
@@ -57,6 +54,8 @@ df_sensors['x'] = gdf_local.geometry.x
 df_sensors['y'] = gdf_local.geometry.y
 df_sensors['node_idx'] = df_sensors.station_id.apply(lambda id: id2idx[id])
 
+node2district = {idx: district for idx, district in zip(df_sensors.node_idx, df_sensors.district_id)}
+
 shape = gpd.read_file(osp.join(dir, 'shapes', 'CHN_adm0.shp'))
 
 fig, ax = plt.subplots(figsize=(10,10))
@@ -71,9 +70,12 @@ fig.savefig(osp.join(dir, 'sensors.png'), dpi=200)
 df_measurements = pd.read_csv(osp.join(dir, 'airquality.csv'))
 df_measurements = df_measurements[df_measurements.station_id.isin(id2idx.keys())]
 df_measurements['node_idx'] = df_measurements.station_id.apply(lambda id: id2idx[id])
+df_measurements['district_id'] = df_measurements.node_idx.apply(lambda idx: node2district[idx])
 
 df_measurements.to_csv(osp.join(dir, 'measurements.csv'))
 df_sensors.to_csv(osp.join(dir, 'sensors.csv'))
+
+print(df_measurements.columns)
 
 
 # df_sensors['x'], df_sensors['y'] = project_eqrect(df_sensors.longitude.values, df_sensors.latitude.values)

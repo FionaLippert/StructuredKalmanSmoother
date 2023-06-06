@@ -1,5 +1,5 @@
-program: test_spdgmrf.py
-name: spatiotemporal_sweep_dynamic
+program: time_spdgmrf.py
+name: spatiotemporal_sweep_dynamic_time
 command:
   - ${env}
   - ${interpreter}
@@ -12,22 +12,27 @@ metric:
 parameters:
   seed:
     values: [0, 1, 2, 3, 4]
-#  lr:
-#    values: [ 0.1, 0.01 ]
   n_layers:
     values: [2]
   use_dynamics:
     values: [true]
   independent_time:
-    values: [false] #, true]
+    values: [false]
   transition_type:
     values: ["advection+diffusion"]
   n_transitions:
-    values: [6]
-#    values: [1, 2, 4, 8]
+    values: [2]
   use_vi_dynamics:
-    values: [ true, false ]
+    values: [ true ]
+  use_KS:
+    values: [ false ]
+  n_iterations:
+    values: [1000]
+  use_bias:
+    values: [false]
+  use_dynamics_bias:
+    values: [false]
   dataset:
-    values: ['"spatiotemporal_30x30_obs=0.9_T=20_diff=0.005_adv=constant_ntrans=16_1block=True_0"']
+    values: ['"spatiotemporal_40x40_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=False_0"']
 
 

@@ -28,6 +28,7 @@ def generate_observations(states, noise_std, obs_ratio):
     jdx, _ = torch.randperm(states.size(0))[:n_obs].sort()
     H = torch.eye(states.size(0))
     H = H[jdx, :]
+    print(H.size())
 
     noise = noise_std * torch.randn(states.size())
     data = states + noise
@@ -46,7 +47,7 @@ def generate_block_observations(states, noise_std, obs_ratio, grid_size, t):
 
         mask = torch.ones(grid_size, grid_size)
         mask[posx : posx + square_size, posy : posy + square_size] = 0
-        # mask[-posx: -posx - square_size, -posy: -posy - square_size] = 0
+        # mask[-posx - square_size : -posx, -posy - square_size : -posy] = 0
 
         jdx = mask.flatten().nonzero().squeeze()
         H = torch.eye(states.size(0))
