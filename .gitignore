@@ -8,6 +8,12 @@ __pycache__/
 
 # deep learning
 scripts/wandb/
+scripts/lightning_logs
+scripts/outputs
+scripts/multirun
+
+# pycharm
+.idea/
 
 # Distribution / packaging
 .Python
