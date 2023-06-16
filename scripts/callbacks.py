@@ -266,6 +266,7 @@ class GraphInferenceCallback(Callback):
         vi_mean = vi_mean.reshape(pl_module.T, -1).cpu()
         vi_std = vi_std.reshape(pl_module.T, -1).cpu()
         data = pl_module.y_masked.reshape(pl_module.T, -1).cpu()
+        data[data == 0] = np.nan
 
         fig, ax = plt.subplots(figsize=(10, 6))
         for idx in self.val_nodes: #[:3]:
@@ -377,6 +378,7 @@ class GraphInferenceCallback(Callback):
         cg_mean = cg_mean.reshape(pl_module.T, -1).cpu()
         cg_std = cg_std.reshape(pl_module.T, -1).cpu()
         data = pl_module.y_masked.reshape(pl_module.T, -1).cpu()
+        data[data == 0] = np.nan
 
         fig, ax = plt.subplots(figsize=(10, 6))
         for idx in self.test_nodes:  # [:3]:

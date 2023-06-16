@@ -181,7 +181,6 @@ class DGMRFLayerMultiChannel(ptg.nn.MessagePassing):
             self.degrees = ptg.utils.degree(self.edge_index[0], num_nodes=self.num_nodes)
 
         print(f'edge weights = {self.edge_weights}')
-        print(f'(weighted) degrees = {self.degrees}')
 
 
         if self.shared == 'dynamics':
@@ -1018,7 +1017,7 @@ class TemporalDGMRF(torch.nn.Module):
 
 
 class VariationalDist(torch.nn.Module):
-    def __init__(self, config, graph, initial_guess, temporal_graph=None, T=1, shared='all'):
+    def __init__(self, config, graph, initial_guess, temporal_graph=None, n_features=0, T=1, shared='all'):
         super().__init__()
 
         # Dimensionality of distribution (num_nodes of graph)
@@ -1028,15 +1027,6 @@ class VariationalDist(torch.nn.Module):
         # Standard amount of samples (must be fixed to be efficient)
         self.n_samples = config["n_training_samples"]
         self.n_post_samples = config["n_post_samples"]
-        # self.noise_std = noise_std #config["noise_std"]
-        # self.log_noise_std = np.log(config["noise_std"])
-
-        # # Variational distribution, Initialize with observed y
-        # self.mean_param = torch.nn.parameter.Parameter(initial_guess)
-        # self.diag_param = torch.nn.parameter.Parameter(2*torch.rand(self.dim) - 1.) # U(-1,1)
-
-        # self.layers = torch.nn.ModuleList([DGMRFLayer(graph, config, vi_layer=True)
-        #                                    for _ in range(config["vi_layers"])])
 
         # Variational distribution, Initialize with observed y
         self.mean_param = torch.nn.parameter.Parameter(initial_guess)
@@ -1050,21 +1040,17 @@ class VariationalDist(torch.nn.Module):
 
 
         if config["vi_layers"] > 0:
-            # self.post_diag_param = torch.nn.parameter.Parameter(
-            #     2*torch.rand(self.dim) - 1.)
             self.post_diag_param = torch.nn.parameter.Parameter(
                 2 * torch.rand(self.T, self.dim) - 1.)
 
-        # Reuse same batch with different x-values
-        # self.sample_batch = ptg.data.Batch.from_data_list([
-        #     ptg.data.Data(edge_index=graph.edge_index, num_nodes=self.dim) for _ in range(self.n_samples)])
-
-        if config["features"] and ('features' in graph):
+        if config["use_features"] and n_features > 0:
             # Additional variational distribution for linear coefficients
-            n_features = graph['features'].shape[1]
-            self.coeff_mean_param = torch.nn.parameter.Parameter(torch.randn(self.T, n_features))
+            self.coeff_mean_param = torch.nn.parameter.Parameter(torch.randn(1, n_features))
             self.coeff_diag_param = torch.nn.parameter.Parameter(
-                2*torch.rand(self.T, n_features) - 1.) # U(-1,1)
+                2*torch.rand(1, n_features) - 1.) # U(-1,1)
+            # self.coeff_mean_param = torch.nn.parameter.Parameter(torch.randn(self.T, n_features))
+            # self.coeff_diag_param = torch.nn.parameter.Parameter(
+            #     2 * torch.rand(self.T, n_features) - 1.)  # U(-1,1)
 
             self.coeff_inv_std = config["coeff_inv_std"]
 
@@ -1114,7 +1100,7 @@ class VariationalDist(torch.nn.Module):
     def sample_coeff(self, n_samples):
         standard_sample = torch.randn(n_samples, *self.coeff_mean_param.shape)
         samples = (self.coeff_std * standard_sample) + self.coeff_mean_param
-        return samples # [n_samples, T, n_features]
+        return samples # [n_samples, 1, n_features]
 
     def log_det_coeff(self):
         return 2.0*torch.sum(torch.log(self.coeff_std))
@@ -1127,6 +1113,7 @@ class VariationalDist(torch.nn.Module):
     @torch.no_grad()
     def posterior_estimate(self, noise_var):
         # Compute mean and marginal std of distribution (posterior estimate)
+        # only for x-part, not for beta-part (linear model for covariates)
 
         # Marginal std. (MC estimate)
         mc_sample_list = []
@@ -1178,7 +1165,7 @@ class ObservationModel(ptg.nn.MessagePassing):
 class SpatiotemporalInference(pl.LightningModule):
 
     def __init__(self, config, initial_guess, data, joint_mask, spatial_graph, temporal_graph=None,
-                 T=1, gt=None, **kwargs):
+                 T=1, gt=None, features=None, **kwargs):
         #def __init__(self, graphs, initial_guess, config):
         super(SpatiotemporalInference, self).__init__()
         self.save_hyperparameters()
@@ -1217,8 +1204,17 @@ class SpatiotemporalInference(pl.LightningModule):
             self.obs_noise_param = torch.tensor(config["noise_std"])
 
         self.use_dynamics = config.get("use_dynamics", False)
-        self.use_hierarchy = config.get("use_hierarchy", False)
         self.independent_time = config.get("independent_time", False)
+        self.use_hierarchy = config.get("use_hierarchy", False)
+        self.use_vi_dynamics = config.get('use_vi_dynamics', False)
+
+        if config.get("use_features", False) and features is not None:
+            self.use_features = True
+            self.features = features # shape [T * num_nodes, num_features]
+        else:
+            self.use_features = False
+            self.features = None
+            print('No node features used')
 
         self.data_mean = kwargs.get('data_mean', 0)
         self.data_std = kwargs.get('data_std', 1)
@@ -1257,13 +1253,10 @@ class SpatiotemporalInference(pl.LightningModule):
             self.input_shape = [self.T, self.num_nodes]
             shared_vi = 'all'
 
-        # shared_vi = "all"
-        if config.get('use_vi_dynamics', False):
-            self.vi_dist = VariationalDist(config, spatial_graph, initial_guess.reshape(self.T, -1),
-                                           temporal_graph=temporal_graph, T=self.T, shared=shared_vi)
-        else:
-            self.vi_dist = VariationalDist(config, spatial_graph, initial_guess.reshape(self.T, -1),
-                                           T=self.T, shared=shared_vi)
+        self.vi_dist = VariationalDist(config, spatial_graph, initial_guess.reshape(self.T, -1),
+                                       T=self.T, shared=shared_vi,
+                                       temporal_graph=(temporal_graph if self.use_vi_dynamics else None),
+                                       n_features=(self.features.size(-1) if self.use_features else 0))
 
         # self.obs_model = ObservationModel(graphs["latent", "observation", "data"], self.N)
         self.obs_model = lambda x: x[:, self.mask]
@@ -1286,8 +1279,9 @@ class SpatiotemporalInference(pl.LightningModule):
         # x has shape [n_samples, T * n_nodes]
         # y_hat = self.obs_model(x)
         # residuals = self.y[index] - y_hat[:, index]
-        residuals = self.y_masked[mask] - x[:, mask]
-        rec_loss = torch.mean(torch.pow(residuals, 2))
+        residuals = self.y_masked[..., mask] - x[..., mask]
+        # rec_loss = torch.mean(torch.pow(residuals, 2))
+        rec_loss = torch.sum(torch.pow(residuals, 2))
 
         return rec_loss
 
@@ -1296,23 +1290,36 @@ class SpatiotemporalInference(pl.LightningModule):
         # v has shape [2, n_samples, n_nodes]
         # N = x.size(-1) * x.size(-2)
 
-        # TODO: is the normalization going correctly? shouldn't we normalize all terms (also rec_loss) by same constant?
         # compute log-likelihood of samples given prior p(x)
         Gx = self.dgmrf(x, v=v)  # shape (n_samples, T, n_nodes)
-        prior_ll = (-0.5 * torch.sum(torch.pow(Gx, 2)) + self.dgmrf.log_det()) / self.N
+        # prior_ll = (-0.5 * torch.sum(torch.pow(Gx, 2)) + self.dgmrf.log_det()) / self.N
+
+        prior_ll = (-0.5 * torch.sum(torch.pow(Gx, 2)) / self.n_training_samples + self.dgmrf.log_det())
 
         ## compute log-likelihood of latent field v
-        if self.use_hierarchy:
-            Gvx = self.dgmrf_vx(v[0]) #.reshape(-1, self.N))
-            Gvy = self.dgmrf_vy(v[1]) #.reshape(-1, self.N))
-            vx_ll = (-0.5 * torch.sum(torch.pow(Gvx, 2)) + self.dgmrf_vx.log_det()) / (self.num_nodes)
-            vy_ll = (-0.5 * torch.sum(torch.pow(Gvy, 2)) + self.dgmrf_vy.log_det()) / (self.num_nodes)
-            prior_ll = prior_ll + vx_ll + vy_ll
+        # if self.use_hierarchy:
+        #     Gvx = self.dgmrf_vx(v[0]) #.reshape(-1, self.N))
+        #     Gvy = self.dgmrf_vy(v[1]) #.reshape(-1, self.N))
+        #     vx_ll = (-0.5 * torch.sum(torch.pow(Gvx, 2)) + self.dgmrf_vx.log_det()) / (self.num_nodes)
+        #     vy_ll = (-0.5 * torch.sum(torch.pow(Gvy, 2)) + self.dgmrf_vy.log_det()) / (self.num_nodes)
+        #     prior_ll = prior_ll + vx_ll + vy_ll
+
+        x = x.reshape(self.n_training_samples, -1)  # shape [n_samples, T * num_nodes]
 
         # compute data log-likelihood given samples
-        x = x.reshape(self.n_training_samples, -1)  # shape [n_samples, T * num_nodes]
-        rec_loss = self._reconstruction_loss(x, mask)
-        data_ll = -0.5 * rec_loss / self.noise_var - self.log_noise_std
+        if self.use_features:
+            coeffs = self.vi_dist.sample_coeff(self.n_training_samples).unsqueeze(1) # [n_samples, 1, n_features]
+            x = x + coeffs @ self.features.transpose(0, 1)
+
+        # rec_loss = self._reconstruction_loss(x, mask)
+
+        rec_loss = self._reconstruction_loss(x, mask) / self.n_training_samples
+
+        data_ll = -0.5 * rec_loss / self.noise_var - self.log_noise_std * mask.sum()
+
+        # scale by total number of nodes in space and time
+        # data_ll = data_ll / self.N
+        # prior_ll = prior_ll / self.N
 
         self.log("train_rec_loss", rec_loss.item(), sync_dist=True)
         self.log("train_prior_ll", prior_ll.item(), sync_dist=True)
@@ -1386,7 +1393,8 @@ class SpatiotemporalInference(pl.LightningModule):
             # N = samples.size(-1) * samples.size(-2)
 
             # compute entropy of variational distribution
-            vi_entropy = 0.5 * self.vi_dist.log_det() / self.N
+            # vi_entropy = 0.5 * self.vi_dist.log_det() / self.N
+            vi_entropy = 0.5 * self.vi_dist.log_det() # TODO: check effect on results in submitted paper!
 
             # if self.use_hierarchy:
             #     v_samples = torch.stack([self.vi_dist_vx.sample(), self.vi_dist_vy.sample()], dim=0).reshape(
@@ -1397,25 +1405,29 @@ class SpatiotemporalInference(pl.LightningModule):
             #     joint_ll = self._joint_log_likelihood(samples, training_index.squeeze())
             joint_ll = self._joint_log_likelihood(samples, self.train_mask)
 
-            elbo = joint_ll + vi_entropy
+            if self.use_features:
+                vi_entropy = vi_entropy + 0.5 * self.vi_dist.log_det_coeff() # log-det for coefficients
+                joint_ll = joint_ll + self.vi_dist.ce_coeff() # cross entropy term for coefficients
+
+
+            elbo = (joint_ll + vi_entropy) / self.N
 
             self.log("train_elbo", elbo.item(), sync_dist=True)
             self.log("vi_entropy", vi_entropy.item(), sync_dist=True)
 
-        return -elbo
+        return -1. * elbo
 
 
     def validation_step(self, val_mask, *args):
 
-        samples = self.vi_dist.sample()
+        samples = self.vi_dist.sample() # shape [n_samples, T, num_nodes]
+        samples = samples.reshape(self.n_training_samples, -1) # shape [n_samples, T * num_nodes]
 
-        pd_check = (samples * self.dgmrf(samples)).reshape(self.n_training_samples, -1).sum(1)
-        if not (pd_check > 0).all():
-            print(f'pd check failed: min value = {pd_check.min()}')
+        if self.use_features:
+            coeffs = self.vi_dist.sample_coeff(self.n_training_samples).unsqueeze(1) # [n_samples, 1, n_features]
+            samples = samples + coeffs @ self.features.transpose(0, 1)
 
-
-        samples = samples.reshape(self.n_training_samples, -1)
-        rec_loss = self._reconstruction_loss(samples, val_mask.squeeze(0))
+        rec_loss = self._reconstruction_loss(samples, val_mask.squeeze(0)) / (val_mask.sum() * self.n_training_samples)
 
         self.log("val_rec_loss", rec_loss.item(), sync_dist=True)
 
@@ -1426,13 +1438,13 @@ class SpatiotemporalInference(pl.LightningModule):
 
         # return val_dict
 
-    def test_step(self, test_mask, *args, **kwargs):
+    def test_step(self, test_mask, *args):
         if self.config.get('use_KS', False):
             self.KS_inference()
         else:
-            self.DGMRF_inference(test_mask.squeeze(0), *args, **kwargs)
+            self.DGMRF_inference(test_mask.squeeze(0), split='test')
 
-    def DGMRF_inference(self, test_mask, *args, **kwargs):
+    def DGMRF_inference(self, test_mask, split='test'):
 
         # posterior inference using variational distribution
         self.vi_mean, self.vi_std = self.vi_dist.posterior_estimate(self.noise_var)
@@ -1441,127 +1453,74 @@ class SpatiotemporalInference(pl.LightningModule):
 
         # use held out part of data to evaluate predictions
         # test_index indexes data space
-        print(test_mask.shape, self.mask.shape)
         data_mask = torch.logical_and(self.mask, torch.logical_not(test_mask))  # all data except test data
 
+        # y_masked = torch.zeros_like(self.y_masked)
+        # y_masked[data_mask] = self.y_masked[data_mask]
+        y_masked = self.y_masked * data_mask
+
+        self.cg_mean, self.cg_std = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
+                                                        data_mask, self.config, self.noise_var,
+                                                        features=self.features)
+
         if hasattr(self, 'gt'):
-            # use unobserved nodes to evaluate predictions
-            # test_index indexes latent space
-
-            self.cg_mean, self.cg_std, cg_time, avg_niter = posterior_inference(self.dgmrf, self.y_masked.reshape(1, *self.input_shape),
-                                                            data_mask, self.config,
-                                                            self.noise_var, return_time=True)  # , initial_guess=vi_mean)
-            # self.cg_mean, self.cg_std = posterior_inference(self.dgmrf, self.y_masked.reshape(1, *self.input_shape),
-            #                                                 self.train_mask, self.config,
-            #                                                 self.noise_var)  # , initial_guess=vi_mean)
-            self.log("CG_time", cg_time, sync_dist=True)
-            self.log("avg_niter", avg_niter, sync_dist=True)
-
-            test_mask = torch.logical_not(self.mask)
-            gt_mean = self.gt[test_mask]# * self.data_std + self.data_mean
-            residuals_vi = (self.gt[test_mask] - mean[test_mask])# * self.data_std + self.data_mean
-            residuals_cg = (self.gt[test_mask] - self.cg_mean[test_mask])# * self.data_std + self.data_mean
-
-            self.log("test_mae_vi", residuals_vi.abs().mean().item(), sync_dist=True)
-            self.log("test_rmse_vi", torch.pow(residuals_vi, 2).mean().sqrt().item(), sync_dist=True)
-            self.log("test_mse_vi", torch.pow(residuals_vi, 2).mean().item(), sync_dist=True)
-            self.log("test_mape_vi", (residuals_vi / gt_mean).abs().mean().item(), sync_dist=True)
-
-            self.log("test_mae_cg", residuals_cg.abs().mean().item(), sync_dist=True)
-            self.log("test_rmse_cg", torch.pow(residuals_cg, 2).mean().sqrt().item(), sync_dist=True)
-            self.log("test_mse_cg", torch.pow(residuals_cg, 2).mean().item(), sync_dist=True)
-            self.log("test_mape_cg", (residuals_cg / gt_mean).abs().mean().item(), sync_dist=True)
-
-            pred_mean_np = mean[test_mask].cpu().numpy()
-            pred_std_np = std[test_mask].cpu().numpy()
-            target_np = self.gt[test_mask].cpu().numpy()
-
-            self.log("test_crps_vi", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
-            self.log("test_int_score_vi", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
-
-            pred_mean_np = self.cg_mean[test_mask].cpu().numpy()
-            pred_std_np = self.cg_std[test_mask].cpu().numpy()
-            target_np = self.gt[test_mask].cpu().numpy()
-
-            self.log("test_crps_cg", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
-            self.log("test_int_score_cg", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
-
+            target = self.gt[test_mask]
         else:
-            # use held out part of data to evaluate predictions
-            # test_index indexes data space
-            # data_mask = self.mask.nonzero()[~test_index] # all data except test data
-            # test_mask = self.mask.nonzero()[test_index] # test data
+            target = self.y_masked[test_mask]
 
-            y_masked = torch.zeros_like(self.y_masked)
-            y_masked[data_mask] = self.y_masked[data_mask]
+        residuals_vi = (target - mean[test_mask])
+        residuals_cg = target - self.cg_mean.squeeze(-1)[test_mask]
 
-            self.cg_mean, self.cg_std = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
-                                                            data_mask, self.config, self.noise_var)
+        self.log(f"{split}_mae_vi", residuals_vi.abs().mean().item(), sync_dist=True)
+        self.log(f"{split}_rmse_vi", torch.pow(residuals_vi, 2).mean().sqrt().item(), sync_dist=True)
+        self.log(f"{split}_mape_vi", (residuals_vi / target).abs().mean().item(), sync_dist=True)
 
-            # data = self.y[test_index]
-            data = self.y_masked[test_mask]
+        self.log(f"{split}_mae_cg", residuals_cg.abs().mean().item(), sync_dist=True)
+        self.log(f"{split}_rmse_cg", torch.pow(residuals_cg, 2).mean().sqrt().item(), sync_dist=True)
+        self.log(f"{split}_mape_cg", (residuals_cg / target).abs().mean().item(), sync_dist=True)
 
-            # masked_mean = self.obs_model(mean.unsqueeze(0)).squeeze(0)
-            # masked_std = self.obs_model(std.unsqueeze(0)).squeeze(0)
-            # masked_mean_cg = self.obs_model(self.cg_mean.unsqueeze(0)).squeeze(0)
-            # masked_std_cg = self.obs_model(self.cg_std.unsqueeze(0)).squeeze(0)
+        pred_mean_np = self.cg_mean.squeeze(-1)[test_mask].cpu().numpy()
+        pred_std_np = self.cg_std.squeeze(-1)[test_mask].cpu().numpy()
+        target_np = target.cpu().numpy()
 
-            # residuals_vi = (self.y[test_index] - masked_mean[test_index])
-            # residuals_cg = (self.y[test_index] - masked_mean_cg[test_index])
-            residuals_vi = (data - mean[test_mask])
-            residuals_cg = (data - self.cg_mean[test_mask])
-
-            self.log("test_mae_vi", residuals_vi.abs().mean().item(), sync_dist=True)
-            self.log("test_rmse_vi", torch.pow(residuals_vi, 2).mean().sqrt().item(), sync_dist=True)
-            self.log("test_mape_vi", (residuals_vi / data).abs().mean().item(), sync_dist=True)
-
-            self.log("test_mae_cg", residuals_cg.abs().mean().item(), sync_dist=True)
-            self.log("test_rmse_cg", torch.pow(residuals_cg, 2).mean().sqrt().item(), sync_dist=True)
-            self.log("test_mape_cg", (residuals_cg / data).abs().mean().item(), sync_dist=True)
-
-            # pred_mean_np = masked_mean_cg[test_index].cpu().numpy()
-            # pred_std_np = masked_std_cg[test_index].cpu().numpy()
-            # target_np = self.y[test_index].cpu().numpy()
-
-            pred_mean_np = self.cg_mean[test_mask].cpu().numpy()
-            pred_std_np = self.cg_std[test_mask].cpu().numpy()
-            target_np = self.y_masked[test_mask].cpu().numpy()
-
-            self.log("test_crps_cg", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
-            self.log("test_int_score_cg", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_crps_cg", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_int_score_cg", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
 
 
     def predict_step(self, predict_mask, *args):
 
         data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask.squeeze(0)))
 
-        if hasattr(self, 'gt'):
-            y_masked = self.y_masked
-            # data_mask = self.mask
-        else:
-            # data_mask = self.mask.nonzero()[~predict_index]  # all data except test data
-            # y_masked = torch.zeros_like(self.y_masked)
-            # y_masked[data_mask] = self.y_masked[data_mask]
-            y_masked = self.y_masked * data_mask
+        y_masked = torch.zeros_like(self.y_masked)
+        y_masked[data_mask] = self.y_masked[data_mask]
+        # y_masked = self.y_masked * data_mask
 
         if not (hasattr(self, 'vi_mean') or hasattr(self, 'vi_std')):
             self.vi_mean, self.vi_std = self.vi_dist.posterior_estimate(self.noise_var)
 
         if not (hasattr(self, 'cg_mean') or hasattr(self, 'cg_std')):
             self.cg_mean, self.cg_std = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
-                                                            data_mask, self.config, self.noise_var)
+                                                            data_mask, self.config, self.noise_var,
+                                                            features=self.features)
 
         if not hasattr(self, 'cg_samples'):
             self.cg_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
-                                    data_mask, self.config, self.noise_var)
+                                               data_mask, self.config, self.noise_var, features=self.features)
+
+            if self.use_features:
+                cg_samples_x = self.cg_samples[:, :self.N]
+                cg_samples_beta = self.cg_samples[:, self.N:]
+                self.cg_samples = cg_samples_x + self.features @ cg_samples_beta
+
 
         return {'cg_mean': self.cg_mean.reshape(self.T, self.num_nodes),
                 'cg_std': self.cg_std.reshape(self.T, self.num_nodes),
                 'cg_samples': self.cg_samples.reshape(-1, self.T, self.num_nodes),
                 'vi_mean': self.vi_mean,
                 'vi_std':  self.vi_std,
-                'data': self.y_masked,
-                'gt': self.gt if hasattr(self, 'gt') else 'NA'}
+                'data': y_masked,
+                'gt': self.gt if hasattr(self, 'gt') else self.y_masked,
+                'predict_mask': predict_mask}
 
     def KS_inference(self):
         Q_0, Q_t, F_t = self.dgmrf.get_matrices(self.num_nodes)
@@ -1581,113 +1540,95 @@ class SpatiotemporalInference(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
         return optimizer
 
-
-def vi_loss(dgmrf, vi_dist, graph_y, config):
-    vi_samples = vi_dist.sample()
-    vi_log_det = vi_dist.log_det()
-    vi_dist.sample_batch.x = vi_samples.reshape(-1,1)
-    # Column vector of node values for all samples
-
-    g = dgmrf(vi_dist.sample_batch) # Shape (n_training_samples*n_nodes, 1)
-
-    # Construct loss
-    l1 = 0.5*vi_log_det
-    l2 = -graph_y.n_observed*config["log_noise_std"]
-    l3 = dgmrf.log_det()
-    l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g,2))
-
-    if config["features"]:
-        vi_coeff_samples = vi_dist.sample_coeff(config["n_training_samples"])
-        # Mean from a VI sample (x + linear feature model)
-        vi_samples = vi_samples + vi_coeff_samples@graph_y.features.transpose(0,1)
-
-        # Added term when using additional features
-        vi_coeff_log_det = vi_dist.log_det_coeff()
-        entropy_term = 0.5*vi_coeff_log_det
-        ce_term = vi_dist.ce_coeff()
-
-        l1 = l1 + entropy_term
-        l4 = l4 + ce_term
-
-    l5 = -(1./(2. * torch.exp(2.*config["log_noise_std"]) *\
-        config["n_training_samples"]))*torch.sum(torch.pow(
-            (vi_samples - graph_y.x.flatten()), 2)[:, graph_y.mask])
-
-    elbo = l1 + l2 + l3 + l4 + l5
-    loss = (-1./graph_y.num_nodes)*elbo
-    return loss
+#
+# def vi_loss(dgmrf, vi_dist, graph_y, config):
+#     vi_samples = vi_dist.sample()
+#     vi_log_det = vi_dist.log_det()
+#     vi_dist.sample_batch.x = vi_samples.reshape(-1,1)
+#     # Column vector of node values for all samples
+#
+#     g = dgmrf(vi_dist.sample_batch) # Shape (n_training_samples*n_nodes, 1)
+#
+#     # Construct loss
+#     l1 = 0.5*vi_log_det
+#     l2 = -graph_y.n_observed*config["log_noise_std"]
+#     l3 = dgmrf.log_det()
+#     l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g,2))
+#
+#     if config["use_features"]:
+#         vi_coeff_samples = vi_dist.sample_coeff(config["n_training_samples"])
+#         # Mean from a VI sample (x + linear feature model)
+#         vi_samples = vi_samples + vi_coeff_samples@graph_y.features.transpose(0,1)
+#
+#         # Added term when using additional features
+#         vi_coeff_log_det = vi_dist.log_det_coeff()
+#         entropy_term = 0.5*vi_coeff_log_det
+#         ce_term = vi_dist.ce_coeff()
+#
+#         l1 = l1 + entropy_term
+#         l4 = l4 + ce_term
+#
+#     l5 = -(1./(2. * torch.exp(2.*config["log_noise_std"]) *\
+#         config["n_training_samples"]))*torch.sum(torch.pow(
+#             (vi_samples - graph_y.x.flatten()), 2)[:, graph_y.mask])
+#
+#     elbo = l1 + l2 + l3 + l4 + l5
+#     loss = (-1./graph_y.num_nodes)*elbo
+#     return loss
 
 
 
 
 # Solve Q_tilde x = rhs using Conjugate Gradient
-def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, verbose=False, initial_guess=None, return_info=False):
+def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, features=None,
+             verbose=False, initial_guess=None, return_info=False):
     # rhs has shape [n_batch, T * n_nodes]
-    # n_nodes = graph_y.num_nodes
-    # x_dummy = torch.zeros(rhs.shape[0],n_nodes,1)
-    # graph_list = [new_graph(graph_y, new_x=x_part) for x_part in x_dummy]
-    # graph_batch = ptg.data.Batch.from_data_list(graph_list)
 
     n_batch = rhs.size(0)
-    N = rhs.size(1)
+    N = mask.numel()
 
     # CG requires more precision for numerical stability
     rhs = rhs.to(torch.float64)
-    #input_shape = rhs.size()
 
     # Batch linear operator
     def Q_tilde_batched(x):
         # x has shape (n_batch, T * n_nodes, 1)
-        # Implicitly applies posterior precision matrix Q_tilde to a vector x
-        # y = ((G^T)G + (sigma^-2)(I_m))x
-
-        # Modify graph batch
-        # graph_batch.x = x.reshape(-1,1)
 
         Gx = dgmrf(x.reshape(n_batch, T, -1), with_bias=False)
-        # Gx = dgmrf(x.reshape(n_batch, -1), with_bias=False)
         GtGx = dgmrf(Gx, transpose=True, with_bias=False) # has shape [n_batch, T, n_nodes]
 
-        # noise_add = mask.to(torch.float64) / (config["noise_std"]**2) # shape [T * n_nodes]
-
         # compute Omega^+ @ x (i.e. posterior precision matrix multiplied x)
-        res = GtGx.view(n_batch, N, 1) #+ noise_add.view(1, N, 1) * x # shape [n_batch, T * n_nodes, 1]
-        # res = GtGx.unsqueeze(-1) + noise_add.view(1, -1, 1) * x  # shape [n_batch, T * n_nodes, 1]
+        res = GtGx.view(n_batch, N, 1)
 
         if noise_var is not None:
             res = res + (mask.to(torch.float64) / noise_var).view(1, N, 1) * x
 
         return res
 
-    # if config["features"]:
-    #     # Feature matrix with 0-rows for masked nodes
-    #     masked_features = graph_y.features * graph_y.mask.to(torch.float64).unsqueeze(1)
-    #     masked_features_cov = masked_features.transpose(0,1)@masked_features
-    #
-    #     noise_precision = 1/torch.exp(2.*config["log_noise_std"])
-    #
-    #     def Q_tilde_batched_with_features(x):
-    #         # x has shape (n_batch, n_nodes+n_features, 1)
-    #         node_x = x[:,:n_nodes]
-    #         coeff_x = x[:,n_nodes:]
-    #
-    #         top_res1 = Q_tilde_batched(node_x)
-    #         top_res2 = noise_precision*masked_features@coeff_x
-    #
-    #         bot_res1 = noise_precision*masked_features.transpose(0,1)@node_x
-    #         bot_res2 = noise_precision*masked_features_cov@coeff_x +\
-    #                 (config["coeff_inv_std"]**2)*coeff_x
-    #
-    #         res = torch.cat((
-    #             top_res1 + top_res2,
-    #             bot_res1 + bot_res2,
-    #             ), dim=1)
-    #
-    #         return res
+    if config["use_features"] and features is not None:
+        # features has shape [T, n_nodes, n_features]
+        masked_features = features.to(torch.float64) * mask.to(torch.float64).view(N, 1) # shape [n_nodes * T, n_features]
+        masked_features_cov = masked_features.transpose(0,1)@masked_features # shape [n_features, n_features]
 
-        # Q_tilde_func = Q_tilde_batched_with_features
-    # else:
-    Q_tilde_func = Q_tilde_batched
+        def Q_tilde_batched_with_features(x):
+            # x has shape (n_batch, N + n_features, 1)
+            node_x = x[:,:N]
+            coeff_x = x[:,N:]
+
+            top_res1 = Q_tilde_batched(node_x) # shape [n_batch, N, 1]
+            top_res2 = (masked_features @ coeff_x) / noise_var # shape [n_batch, N, 1]
+
+            bot_res1 = (masked_features.transpose(0,1) @ node_x) / noise_var # shape [n_batch, n_features, 1]
+            bot_res2 = (masked_features_cov @ coeff_x) / noise_var +\
+                    (config["coeff_inv_std"]**2)*coeff_x # shape [n_batch, n_features, 1]
+
+            res = torch.cat([top_res1 + top_res2, bot_res1 + bot_res2], dim=1) # shape [n_batch, N + n_features, 1]
+
+            return res
+
+        Q_tilde_func = Q_tilde_batched_with_features
+    else:
+        Q_tilde_func = Q_tilde_batched
 
     solution, cg_info = cg_batch.cg_batch(Q_tilde_func, rhs.unsqueeze(-1), X0=initial_guess,
                                           rtol=config["inference_rtol"], maxiter=config["max_cg_iter"], verbose=verbose)
@@ -1744,36 +1685,40 @@ def get_bias(dgmrf, input_shape):
 #     return samples
 
 @torch.no_grad()
-def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, return_info=False):
+def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, return_info=False, features=None):
     # Construct RHS using Papandeous and Yuille method
     bias = get_bias(dgmrf, data.size())
     T, num_nodes = data.shape[1:]
     std_gauss1 = torch.randn(n_samples, T, num_nodes)
-    std_gauss2 = torch.randn(n_samples, T, num_nodes)
+    std_gauss2 = torch.randn(n_samples, T * num_nodes)
 
-    rhs_sample1 = dgmrf(std_gauss1 - bias, transpose=True, with_bias=False) # G^T @ (z_1 - b)
+    # G^T @ (z_1 - b)
+    rhs_sample1 = dgmrf(std_gauss1 - bias, transpose=True, with_bias=False).reshape(n_samples, -1)
 
-    float_mask = mask.to(torch.float32).reshape(1, T, num_nodes)
-
-    rhs_sample2 = float_mask * (data + noise_var.sqrt() * std_gauss2) / noise_var # H^T @ R^{-1} @ (y + z_2)
+    # H^T @ R^{-1} @ (y + z_2)
+    rhs_sample2 = (mask.to(torch.float32) * data.to(torch.float32).reshape(-1, T * num_nodes)
+                   + mask.to(torch.float32) * noise_var.sqrt() * std_gauss2) / noise_var
 
     rhs_sample = rhs_sample1 + rhs_sample2
     # Shape (n_samples, n_nodes, 1)
 
-    # if config["features"]:
-    #     # Change rhs to also sample coefficients
-    #     n_features = graph_y.features.shape[1]
-    #     std_gauss1_coeff = torch.randn(n_samples, n_features, 1)
-    #     rhs_sample1_coeff = config["coeff_inv_std"]*std_gauss1_coeff
-    #
-    #     rhs_sample2_coeff = graph_y.features.transpose(0,1)@rhs_sample2
-    #     rhs_sample_coeff = rhs_sample1_coeff + rhs_sample2_coeff
-    #
-    #     rhs_sample = torch.cat((rhs_sample, rhs_sample_coeff), dim=1)
+    if config["use_features"] and features is not None:
+        # Change rhs to also sample coefficients
+        n_features = features.size(-1)
+        std_gauss1_coeff = torch.randn(n_samples, n_features, 1)
+        rhs_sample1_coeff = config["coeff_inv_std"] * std_gauss1_coeff
 
-    # Solve using Conjugate gradient
-    samples, cg_info = cg_solve(rhs_sample.reshape(n_samples, -1), dgmrf, mask, data.size(1), config,
-                       noise_var=noise_var, verbose=False, return_info=True)
+        rhs_sample2_coeff = features.transpose(0,1) @ rhs_sample2.view(n_samples, T * num_nodes, 1)
+        rhs_sample_coeff = rhs_sample1_coeff + rhs_sample2_coeff
+
+
+        rhs_sample = torch.cat((rhs_sample, rhs_sample_coeff.squeeze(-1)), dim=1)
+
+        samples, cg_info = cg_solve(rhs_sample, dgmrf, mask, data.size(1), config,
+                                    noise_var=noise_var, verbose=False, return_info=True, features=features)
+    else:
+        samples, cg_info = cg_solve(rhs_sample, dgmrf, mask, data.size(1), config,
+                           noise_var=noise_var, verbose=False, return_info=True)
     if return_info:
         return samples, cg_info
     else:
@@ -1818,27 +1763,45 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess=None):
     return post_mean
 
 @torch.no_grad()
-def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None, verbose=False, return_time=False):
+def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None, features=None,
+                        verbose=False, return_time=False):
     # data has shape [n_batch, T, num_nodes]
     niter_list = []
+    N = mask.numel()
     start = timer()
     bias = get_bias(dgmrf, data.size())
     eta = -1. * dgmrf(bias, transpose=True, with_bias=False) # -G^T @ b
 
-    masked_y = mask.to(torch.float32).reshape(1, *data.shape[1:]) * data # H^T @ y
+    masked_y = mask.to(torch.float32).reshape(1, *data.shape[1:]) * data.to(torch.float32) # H^T @ y (has shape [1, T, num_nodes])
     mean_rhs = eta + masked_y / noise_var # eta + H^T @ R^{-1} @ y
     mean_rhs = mean_rhs.reshape(data.size(0), -1)
 
     print(f'compute posterior mean')
-    post_mean, cg_info = cg_solve(mean_rhs.reshape(data.size(0), -1), dgmrf, mask, data.size(1), config,
-                         noise_var=noise_var, verbose=False, return_info=True) #,
-                         # initial_guess=initial_guess.reshape(*mean_rhs.size(), 1))[0]
+
+    if config["use_features"] and features is not None:
+        rhs_append = (features.transpose(0, 1) @ masked_y.reshape(-1, 1)) / noise_var
+        mean_rhs = torch.cat([mean_rhs, rhs_append.view(1, -1).repeat(mean_rhs.size(0), 1)], dim=1) # shape [n_batch, T * num_nodes + n_features]
+
+        # run CG iterations
+        post_mean, cg_info = cg_solve(mean_rhs, dgmrf, mask, data.size(1), config,
+                                      noise_var=noise_var, verbose=False, return_info=True, features=features)
+        post_mean = post_mean[0]
+        post_mean_x = post_mean[:N]
+        post_mean_beta = post_mean[N:]
+
+        print(f'posterior coefficients: {post_mean_beta}')
+
+        post_mean = post_mean_x + features @ post_mean_beta
+    else:
+        # run CG iterations
+        post_mean, cg_info = cg_solve(mean_rhs.reshape(data.size(0), -1), dgmrf, mask, data.size(1), config,
+                                      noise_var=noise_var, verbose=False, return_info=True)
+        post_mean = post_mean[0]
 
     end = timer()
     time_per_iter = (end - start) / cg_info["niter"]
 
     niter_list.append(cg_info["niter"])
-    post_mean = post_mean[0]
 
 
     print(f'draw samples from posterior')
@@ -1846,12 +1809,20 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None
     cur_post_samples = 0
     while cur_post_samples < config["n_post_samples"]:
         samples, cg_info = sample_posterior(config["n_training_samples"], dgmrf, data, mask, config,
-                                            noise_var, return_info=True)
+                                            noise_var, return_info=True, features=features)
         posterior_samples_list.append(samples)
         cur_post_samples += config["n_training_samples"]
         niter_list.append(cg_info["niter"])
 
     posterior_samples = torch.cat(posterior_samples_list, dim=0)[:config["n_post_samples"]]
+
+    if config["use_features"] and features is not None:
+        post_samples_x = posterior_samples[:, :N]
+        post_samples_beta = posterior_samples[:, N:]
+        posterior_samples = post_samples_x + features @ post_samples_beta
+
+        post_var_beta = torch.mean(torch.pow(post_samples_beta - post_mean_beta, 2), dim=0)
+        print(f'posterior coeff var: {post_var_beta}')
 
     # MC estimate of variance using known population mean
     post_var_x = torch.mean(torch.pow(posterior_samples - post_mean, 2), dim=0)

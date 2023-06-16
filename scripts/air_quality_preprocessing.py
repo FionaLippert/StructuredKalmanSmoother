@@ -13,7 +13,9 @@ from structuredKS import utils
 import utils_dgmrf
 
 dir = '../datasets/AirQuality'
-weather_vars = ['temperature', 'pressure', 'humidity', 'wind_speed', 'wind_direction']
+# weather_vars = ['temperature', 'pressure', 'humidity', 'wind_speed', 'wind_direction']
+# weather_vars = ['t2m', 'sp', 'tp', 'u10', 'v10']
+weather_vars = ['t2m', 'rh', 'sp', 'u10', 'v10', 'solarpos', 'solarpos_dt', 'dayofyear']
 
 parser = argparse.ArgumentParser(description='Generate AirQuality dataset')
 
@@ -23,7 +25,7 @@ parser.add_argument("--year", type=int, default=2015, help="year to select")
 parser.add_argument("--month", type=int, default=3, help="month to select")
 parser.add_argument("--data_split", type=list, default=0.9, help="fraction of non-test data to use for training, rest is used for validation")
 parser.add_argument("--standardize", default=False, action='store_true', help="Standardize data to mean=0, std=1")
-parser.add_argument("--block_mask", default=False, action='store_true', help="Use block mask instead of random mask")
+parser.add_argument("--mask", default='spatial_block', help="Type of mask; spatial_block, all_spatial, all_temporal, forecasting, or random")
 parser.add_argument("--mask_size", type=float, default=0.62, help="mask size in percentage of total area")
 parser.add_argument("--log_transform", default=False, action='store_true', help="apply log transform")
 parser.add_argument("--variable", type=str, default="PM25", help="Target variable")
@@ -33,7 +35,11 @@ args = parser.parse_args()
 
 df_sensors = pd.read_csv(osp.join(dir, 'sensors.csv'))
 df_measurements = pd.read_csv(osp.join(dir, 'measurements.csv'))
-df_meteo = pd.read_csv(osp.join(dir, 'meteorology.csv'))
+# df_meteo = pd.read_csv(osp.join(dir, 'meteorology.csv'))
+df_covariates = pd.read_csv(osp.join(dir, f'covariates_{args.year}_{args.month}.csv'))
+
+print(f'longitude: min = {df_sensors.longitude.min()}, max = {df_sensors.longitude.max()}')
+print(f'latitude: min = {df_sensors.latitude.min()}, max = {df_sensors.latitude.max()}')
 
 
 pos = np.stack([df_sensors.x.values, df_sensors.y.values]).T
@@ -57,7 +63,7 @@ G.weighted_eigvals = utils.compute_eigenvalues_weighted(G)
 G.eigvals = utils.compute_eigenvalues(G)
 
 
-if args.block_mask:
+if args.mask == 'spatial_block':
     # define block mask area
     xmin, xmax, ymin, ymax = G.pos[:, 0].min(), G.pos[:, 0].max(), G.pos[:, 1].min(), G.pos[:, 1].max()
     xmin = xmin + (1 - args.mask_size) * (xmax-xmin)
@@ -73,25 +79,32 @@ if args.block_mask:
     val_mask = torch.zeros_like(test_mask)
     val_mask[val_nodes] = 1
 
-
 # time processing
 df_measurements['timestamp'] = pd.to_datetime(df_measurements['time'])
 df_measurements.set_index('timestamp', inplace=True)
-df_meteo['timestamp'] = pd.to_datetime(df_meteo['time'])
-df_meteo.set_index('timestamp', inplace=True)
+# df_meteo['timestamp'] = pd.to_datetime(df_meteo['time'])
+# df_meteo.set_index('timestamp', inplace=True)
+
 
 # filter time
 df_sub = df_measurements[df_measurements.index.year == args.year]
 df_sub = df_sub[df_sub.index.month == args.month]
-df_meteo = df_meteo[df_meteo.index.year == args.year]
-df_meteo = df_meteo[df_meteo.index.month == args.month]
+# df_meteo = df_meteo[df_meteo.index.year == args.year]
+# df_meteo = df_meteo[df_meteo.index.month == args.month]
 
-# interpolate meteorology to missing time points
-df_meteo.drop('time', inplace=True, axis=1)
-df_meteo.drop('weather', inplace=True, axis=1)
-df_meteo = df_meteo.groupby('id')[weather_vars]
-df_meteo = df_meteo.resample('1H').mean()
-df_meteo = df_meteo.interpolate().reset_index()
+df_covariates.set_index('timestamp', inplace=True)
+
+# df_covariates = df_covariates[df_covariates.index.year == args.year]
+# df_covariates = df_meteo[df_covariates.index.month == args.month]
+
+# # interpolate meteorology to missing time points
+# df_meteo.drop('time', inplace=True, axis=1)
+# df_meteo.drop('weather', inplace=True, axis=1)
+# df_meteo = df_meteo.groupby('id')[weather_vars]
+# df_meteo = df_meteo.resample('1H').mean()
+# df_meteo = df_meteo.interpolate().reset_index()
+#
+# print(df_meteo.head())
 
 
 nodes = torch.arange(G.num_nodes)
@@ -126,20 +139,28 @@ for tidx, (ts, df_t) in enumerate(df_sub.groupby('timestamp', sort=True)):
         df_t = df_t[['node_idx', variable]].dropna().sort_values('node_idx')
         mask = torch.isin(nodes, torch.tensor(df_t.node_idx.values), assume_unique=True)
 
-        df_weather = df_meteo.query(f'index == "{ts}"')
-        df_weather = pd.merge(df_sensors, df_weather, how='left', left_on='district_id', right_on='id')
-        if len(df_weather) != len(nodes):
-            print(len(df_weather), len(nodes))
-            print(torch.logical_not(torch.isin(nodes, torch.tensor(df_weather.node_idx.values))).nonzero().flatten())
+        # print(ts)
+
+        # df_weather = df_meteo.query(f'timestamp == "{ts}"')
+        df_weather = df_covariates.query(f'timestamp == "{ts}"')
+        # print(df_weather)
+        # print(df_weather.id.nunique(), df_sensors.district_id.nunique())
+        # print(torch.isin(torch.tensor(df_sensors.district_id.unique()), torch.tensor(df_weather.id.unique())))
+        # df_weather = pd.merge(df_sensors, df_weather, how='left', left_on='district_id', right_on='id')
+        # print(df_weather.head())
+        # if len(df_weather) != len(nodes):
+        #     print(len(df_weather), len(nodes))
+        #     print(torch.logical_not(torch.isin(nodes, torch.tensor(df_weather.node_idx.values))).nonzero().flatten())
 
         data = torch.tensor(df_t[variable].values)
-        covariates = torch.tensor(df_weather[weather_vars].values) # shape [num_nodes, n_vars]
+        covariates = torch.tensor(df_weather.sort_values('node_idx')[weather_vars].values) # shape [num_nodes, n_vars]
+        # print(covariates.min(), covariates.max())
         all_data.append(data)
         all_masks.append(mask)
         timestamps.append(ts)
         all_covariates.append(covariates)
 
-        if args.block_mask:
+        if args.mask == 'spatial_block':
 
             # apply mask for 20% of the time steps
             if ((tidx - tidx_start) > 0.2 * T) and ((tidx - tidx_start) < 0.7 * T):
@@ -169,19 +190,72 @@ all_masks = torch.stack(all_masks, dim=0)
 joint_mask = all_masks.reshape(-1)
 all_covariates = torch.cat(all_covariates, dim=0) # shape [T * num_nodes, n_vars]
 
-if args.block_mask:
+# normalize covariates
+all_covariates = all_covariates - all_covariates.min(0).values
+all_covariates = all_covariates / all_covariates.max(0).values
+all_covariates = all_covariates * 2 - 1 # scale to range (-1, 1)
+
+if args.mask == 'spatial_block':
     all_test_masks = torch.stack(all_test_masks, dim=0)
     all_train_masks = torch.stack(all_train_masks, dim=0)
     all_val_masks = torch.stack(all_val_masks, dim=0)
 
-    # split data into train, val and test set
-    # test_idx = torch.cat(all_test_indices, dim=0)
-    # trainval_indices = torch.cat(all_trainval_indices, dim=0)
+    print(f'fraction of masked nodes = {test_mask.sum() / G.num_nodes}')
 
-    # n_trainval = all_trainval_masks.sum()
-    # random_idx = torch.randperm(n_trainval)
-    # train_idx = all_trainval_masks.reshape(-1).nonzero().squeeze()[random_idx][:int(n_trainval * args.data_split)]
-    # val_idx = all_trainval_masks.reshape(-1).nonzero().squeeze()[random_idx][int(n_trainval * args.data_split):]
+    # plot masked sensors on map
+    fig, ax = plt.subplots(figsize=(10, 10))
+    colors = [(1, 0, 0, 0.7)] * G.num_nodes
+    for i in test_mask.nonzero().squeeze():
+        colors[i] = (0, 0, 1, 0.7)
+    nx.draw_networkx_nodes(G_nx, pos, node_size=10, node_color=colors, ax=ax, alpha=0.7)
+    nx.draw_networkx_edges(G_nx, pos, ax=ax, width=0.5, arrowsize=0.1)
+    fig.savefig(osp.join(dir, 'masked_sensors.png'), dpi=200)
+
+elif args.mask == 'all_spatial':
+    # mask all nodes for a random set of time points
+    random_idx = torch.randperm(T)
+    n_trainval = int(T * args.obs_ratio)
+    n_test = T - n_trainval
+    n_train = int(n_trainval * args.data_split)
+
+    all_test_masks = torch.zeros_like(joint_mask).reshape(T, -1)
+    all_test_masks[random_idx[:n_test]] = 1
+
+    all_train_masks = torch.zeros_like(joint_mask).reshape(T, -1)
+    all_train_masks[random_idx[n_test:(n_test + n_train)]] = 1
+
+    all_val_masks = torch.zeros_like(joint_mask).reshape(T, -1)
+    all_val_masks[random_idx[(n_test + n_train):]] = 1
+
+elif args.mask == 'forecasting':
+    # mask all nodes for last few time steps
+    n_trainval = int(T * args.obs_ratio)
+    n_train = int(n_trainval * args.data_split)
+
+    all_train_masks = torch.zeros_like(joint_mask).reshape(T, -1)
+    all_train_masks[:n_train] = 1
+
+    all_val_masks = torch.zeros_like(joint_mask).reshape(T, -1)
+    all_val_masks[n_train:n_train + n_val] = 1
+
+    all_test_masks = torch.zeros_like(joint_mask).reshape(T, -1)
+    all_test_masks[n_train + n_val:] = 1
+
+elif args.mask == 'all_temporal':
+    # mask all time steps for a random set of nodes
+    random_idx = torch.randperm(G.num_nodes)
+    n_trainval = int(G.num_nodes * args.obs_ratio)
+    n_test = G.num_nodes - n_trainval
+    n_train = int(n_trainval * args.data_split)
+
+    all_test_masks = torch.zeros_like(joint_mask).reshape(T, -1)
+    all_test_masks[:, random_idx[:n_test]] = 1
+
+    all_train_masks = torch.zeros_like(joint_mask).reshape(T, -1)
+    all_train_masks[:, random_idx[n_test:(n_test + n_train)]] = 1
+
+    all_val_masks = torch.zeros_like(joint_mask).reshape(T, -1)
+    all_val_masks[:, random_idx[(n_test + n_train):]] = 1
 
 else:
     n_obs = joint_mask.sum()
@@ -208,15 +282,6 @@ else:
     all_test_masks = all_test_masks.reshape(T, -1)
 
 
-# plot masked sensors on map
-fig, ax = plt.subplots(figsize=(10,10))
-colors = [(1, 0, 0, 0.7)] * G.num_nodes
-for i in test_mask.nonzero().squeeze():
-    colors[i] = (0, 0, 1, 0.7)
-nx.draw_networkx_nodes(G_nx, pos, node_size=10, node_color=colors, ax=ax, alpha=0.7)
-nx.draw_networkx_edges(G_nx, pos, ax=ax, width=0.5, arrowsize=0.1)
-fig.savefig(osp.join(dir, 'masked_sensors.png'), dpi=200)
-
 
 print(f'processed time period between {timestamps[0]} and {timestamps[-1]}')
 
@@ -225,7 +290,6 @@ print(f'num nodes = {joint_mask.size(0)}')
 print(f'number of edges = {G.edge_index.size(1)}')
 print(f'obs ratio = {joint_mask.sum() / joint_mask.size(0)}')
 
-print(f'fraction of masked nodes = {test_mask.sum() / G.num_nodes}')
 print(f'fraction of test indices = {all_test_masks.sum() / joint_mask.numel()}')
 
 data = {
@@ -242,9 +306,11 @@ data = {
     # "test_idx": test_idx
     }
 
+obs_ratio = args.mask_size if args.mask == "spatial_block" else args.obs_ratio
+
 # save graph
-ds_name = f'AQ_{args.variable}_T={T}_{args.year}_{args.month}_log={args.log_transform}_1block={args.block_mask}_' \
-          f'{args.mask_size if args.block_mask else args.obs_ratio}'
+ds_name = f'AQ_{args.variable}_T={T}_{args.year}_{args.month}_log={args.log_transform}_mask={args.mask}_' \
+          f'{obs_ratio}'
 print(f'Saving dataset {ds_name}')
 utils_dgmrf.save_graph_ds(data, args, ds_name)
 

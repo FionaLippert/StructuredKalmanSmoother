@@ -2,66 +2,66 @@ import cdsapi
 import os
 import xarray as xr
 import rioxarray
-from shapely import geometry
-import pyproj
-import geopandas as gpd
-import torch
-import torch_geometric as ptg
-import stripy
+# from shapely import geometry
+# import pyproj
+# import geopandas as gpd
+# import stripy
 
 VARNAMES = {'2m_temperature' : 't2m',
-            'soil_temperature_level_3': 'st3'}
+            'soil_temperature_level_3': 'st3',
+            'total_precipitation': 'tp',
+            '10m_u_component_of_wind': 'u10',
+            '10m_v_component_of_wind': 'v10',
+            'surface_pressure': 'sp'}
 
-def lonlat2local(lon, lat):
-        pts_lonlat = gpd.GeoSeries([geometry.Point(point) for point in zip(lon, lat)], crs=f'epsg:4326')
+# def lonlat2local(lon, lat):
+#         pts_lonlat = gpd.GeoSeries([geometry.Point(point) for point in zip(lon, lat)], crs=f'epsg:4326')
+#
+#         # setup local "azimuthal equidistant" coordinate system
+#         lat_0 = pts_lonlat.y.mean()
+#         lon_0 = pts_lonlat.x.mean()
+#         crs_local = pyproj.Proj(proj='aeqd', ellps='WGS84', datum='WGS84', lat_0=lat_0, lon_0=lon_0).crs
+#         pts_local = pts_lonlat.to_crs(crs_local)
+#
+#         print(pts_local.x, pts_local.y)
 
-        # setup local "azimuthal equidistant" coordinate system
-        lat_0 = pts_lonlat.y.mean()
-        lon_0 = pts_lonlat.x.mean()
-        crs_local = pyproj.Proj(proj='aeqd', ellps='WGS84', datum='WGS84', lat_0=lat_0, lon_0=lon_0).crs
-        pts_local = pts_lonlat.to_crs(crs_local)
-
-        print(pts_local.x, pts_local.y)
-
-def load(data_dir, variable='2m_temperature'):
-    assert variable in VARNAMES
+def load(data_dir, bounds, variables=['2m_temperature'], month=3, year=2015):
+    # assert variable in VARNAMES
 
     os.makedirs(data_dir, exist_ok=True)
 
-    fp = os.path.join(data_dir, f'era5_{variable}.nc')
+    # fp = os.path.join(data_dir, f'era5_{variable}_{year}_{month}.nc')
+    fp = os.path.join(data_dir, f'era5_{year}_{month}.nc')
 
     if not os.path.isfile(fp):
         cds = cdsapi.Client()
 
-        config = {'variable': variable,
+        config = {'variable': variables,
                   'format': 'netcdf',
                   'product_type': 'reanalysis'}
 
-        # months = [f'{(m + 1):02}' for m in range(12)]
-        months = ['01']
-        # days = [f'{(d + 1):02}' for d in range(31)]
-        days = [f'{(d + 1):02}' for d in range(7)]
+        month = f'{(month):02}'
+        days = [f'{(d + 1):02}' for d in range(31)]
         time = [f'{h:02}:00' for h in range(24)]
-        bounds = [72, -25, 34, 45]
         grid_res = 1
         resolution = [grid_res, grid_res]
 
-        info = { 'year' : 2022,
-                 'month' : months,
+        info = { 'year' : year,
+                 'month' : month,
                  'day' : days,
                  'area': bounds,
                  'grid' : resolution,
                  'time' : time }
 
         config.update(info)
-        # cds.retrieve('reanalysis-era5-single-levels', config, fp)
-        cds.retrieve('reanalysis-era5-land', config, fp)
+        cds.retrieve('reanalysis-era5-single-levels', config, fp)
+        # cds.retrieve('reanalysis-era5-land', config, fp)
 
     # load .nc file and extract relevant information
     data = xr.open_dataset(fp)
     data = data.rio.write_crs('EPSG:4326')  # set crs to lat lon
-    y = data[VARNAMES[variable]]
-    lonlat2local(data.longitude, data.latitude)
+    # data = data[VARNAMES[variable]]
+    # lonlat2local(data.longitude, data.latitude)
 
     # create spherical mesh from given latlon points
     #vertices_lat = np.radians(latlondeg.T[0])
@@ -71,6 +71,9 @@ def load(data_dir, variable='2m_temperature'):
 
     # or first create spherical mesh and then use it to index dataset
     #spherical_triangulation = stripy.spherical_meshes.icosahedral_mesh(refinement_levels=0)
+
+    return data
+
 
 
 

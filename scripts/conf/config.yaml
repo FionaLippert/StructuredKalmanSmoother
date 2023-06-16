@@ -2,9 +2,12 @@
 output_dir: results
 #dataset: pems_start=0_end=215
 data_dir: /home/flipper/StructuredKalmanSmoother/datasets
-dataset: AQ_PM25_T=24_2015_3_log=True
+dataset: AQ_PM25_T=400_2015_3_log=True_mask=spatial_block_0.62
 #dataset: spatiotemporal_10x10_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_0
 experiment: testing
+
+# final model evaluation?
+final: false
 
 # dgmrf settings
 noise_std: 0.1
@@ -18,7 +21,8 @@ use_bias: true
 n_training_samples: 10
 n_post_samples: 100
 vi_layers: 1
-features: false
+use_features: false
+coeff_inv_std: 0.0001
 independent_time: false
 weighted_dgmrf: false
 weighted_vi: false
@@ -50,5 +54,11 @@ max_cg_iter: 500
 device: gpu
 early_stopping_patience: 100
 
-# baseline settings
+# ARIMA settings
 arima_params: [1, 0, 1]
+#seasonal_params: [1, 0, 1, 24]
+
+# MLP settings
+MLP_hidden_dim: 10
+MLP_nonlinearity: ReLU
+

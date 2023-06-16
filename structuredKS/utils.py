@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributions.multivariate_normal import MultivariateNormal
 import scipy.linalg as spl
+import scipy.stats as sps
 import torch_geometric as ptg
 import os
 import numpy as np
@@ -9,6 +10,25 @@ import numpy as np
 def seed_all(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def crps_score(pred_mean, pred_std, target):
+    # Inputs should be numpy arrays
+    z = (target - pred_mean)/pred_std
+
+    crps = pred_std*((1./np.sqrt(np.pi)) - 2*sps.norm.pdf(z) - z*(2*sps.norm.cdf(z) - 1))
+    return (-1.)*np.mean(crps) # Negative crps, so lower is better
+
+def int_score(pred_mean, pred_std, target, alpha=0.05):
+    lower_std, upper_std = sps.norm.interval(1.-alpha)
+    lower = pred_mean + pred_std*lower_std
+    upper = pred_mean + pred_std*upper_std
+
+    int_score = (upper - lower) + (2/alpha)*(lower-target)*(target < lower) +\
+        (2/alpha)*(target-upper)*(target > upper)
+
+    return np.mean(int_score)
+
 
 def compute_posterior(precision, mean, y, H, R_inv):
     if mean.dim() == 1:

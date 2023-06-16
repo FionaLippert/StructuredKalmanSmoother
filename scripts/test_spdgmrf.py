@@ -28,6 +28,29 @@ def seed_all(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+def print_params(model, config, header=None):
+    if header:
+        print(header)
+
+    print("Aggregation weights:")
+    for layer_i, layer in enumerate(model.layers):
+        print("Layer {}".format(layer_i))
+        if hasattr(layer, "activation_weight"):
+            print("non-linear weight: {:.4}".format(layer.activation_weight.item()))
+        else:
+            print("self: {:.4}, neighbor: {:.4}".format(
+                layer.self_weight[0].item(), layer.neighbor_weight[0].item()))
+
+        if hasattr(layer, "degree_power"):
+            print("degree power: {:.4}".format(layer.degree_power[0].item()))
+
+def get_model(run_path):
+    api = wandb.Api()
+    artifact = api.artifact(run_path, type='models')
+    model_path = osp.join(artifact.download(), 'model.pt')
+
+    return model_path
+
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
@@ -66,47 +89,54 @@ def run_dgmrf(config: DictConfig):
     spatial_graph = dataset_dict["spatial_graph"]
     temporal_graph = dataset_dict["temporal_graph"]
 
+    if config.get('use_features', False):
+        features = dataset_dict["covariates"].to(torch.float32)
+        features = features - features.mean(0)
+        features = features / features.std(0)
+        print(f'use {features.size(1)} features')
+    else:
+        features = None
+
     data = dataset_dict["data"]
     masks = dataset_dict["masks"] # shape [T, num_nodes]
     joint_mask = masks.reshape(-1)
+
+    val_nodes = dataset_dict["val_masks"].sum(0).nonzero().squeeze()
+    # val_nodes = val_nodes[~torch.isin(val_nodes, test_nodes)]
+    val_nodes = val_nodes[torch.randperm(val_nodes.numel())[:5]]
+
+    if not config.get('final', False):
+        # exclude all test data for training and validation runs
+        trainval_mask = torch.logical_not(dataset_dict["test_masks"].reshape(-1))
+        data = data[trainval_mask[joint_mask]]
+        joint_mask = torch.logical_and(joint_mask, trainval_mask)
+
+        # don't use test set yet
+        test_nodes = val_nodes
+    else:
+        test_nodes = dataset_dict["test_masks"].sum(0).nonzero().squeeze()
+        test_nodes = test_nodes[torch.randperm(test_nodes.numel())[:5]]
 
     M = data.numel()
     N = masks.numel()
     T = masks.size(0)
 
-    val_nodes = dataset_dict["val_masks"].sum(0).nonzero().squeeze()
-    test_nodes = dataset_dict["test_masks"].sum(0).nonzero().squeeze()
-
-    val_nodes = val_nodes[~torch.isin(val_nodes, test_nodes)]
-    val_nodes = val_nodes[torch.randperm(val_nodes.numel())[:5]]
-    test_nodes = test_nodes[torch.randperm(test_nodes.numel())[:5]]
-
     print(f'initial guess = {data.mean()}')
     initial_guess = torch.ones(N) * data.mean()
 
     model = SpatiotemporalInference(config, initial_guess, data, joint_mask,
-                                    spatial_graph.to_dict(), temporal_graph.to_dict(), T=T, gt=dataset_dict.get('gt', None),
-                                    data_mean=dataset_dict.get('data_mean', 0), data_std=dataset_dict.get('data_std', 1))
+                                    spatial_graph.to_dict(), temporal_graph.to_dict(),
+                                    T=T, gt=dataset_dict.get('gt', None),
+                                    data_mean=dataset_dict.get('data_mean', 0),
+                                    data_std=dataset_dict.get('data_std', 1),
+                                    features=features)
 
 
     for param_name, param_value in model.dgmrf.state_dict().items():
         print("{}: {}".format(param_name, param_value))
 
 
-    # dataloaders contain data masks defining which observations to use for training, validation, testing
-    # ds_train = DummyDataset(dataset_dict['train_idx'], config["val_interval"])
-    # ds_val = DummyDataset(dataset_dict['val_idx'], 1)
-    # ds_test = DummyDataset(dataset_dict['test_idx'], 1)
-
-    ds_train = DummyDataset(dataset_dict['train_masks'].reshape(-1), config["val_interval"])
-    ds_val = DummyDataset(dataset_dict['val_masks'].reshape(-1), 1)
-    ds_test = DummyDataset(dataset_dict['test_masks'].reshape(-1), 1)
-
-    dl_train = DataLoader(ds_train, batch_size=1, shuffle=False)
-    dl_val = DataLoader(ds_val, batch_size=1, shuffle=False)
-    dl_test = DataLoader(ds_test, batch_size=1, shuffle=False)
-
-    wandb_logger = WandbLogger(log_model='all')
+    wandb_logger = WandbLogger() #log_model='all')
     # log_predictions_callback = LogPredictionsCallback(wandb_logger, t=1)
 
     if ("true_posterior_mean" in dataset_dict) and ("gt" in dataset_dict):
@@ -180,25 +210,29 @@ def run_dgmrf(config: DictConfig):
         callbacks=[inference_callback, earlystopping_callback],
     )
 
-    def print_params(model, config, header=None):
-        if header:
-            print(header)
 
-        print("Aggregation weights:")
-        for layer_i, layer in enumerate(model.layers):
-            print("Layer {}".format(layer_i))
-            if hasattr(layer, "activation_weight"):
-                print("non-linear weight: {:.4}".format(layer.activation_weight.item()))
-            else:
-                print("self: {:.4}, neighbor: {:.4}".format(
-                    layer.self_weight[0].item(), layer.neighbor_weight[0].item()))
+    if 'wandb_run' in config:
+        # load pre-trained model
+        model_path = get_model(config.get('wandb_run'))
+        model.load_state_dict(torch.load(model_path))
+    else:
+        # train model
+        ds_train = DummyDataset(dataset_dict['train_masks'].reshape(-1), config["val_interval"])
+        dl_train = DataLoader(ds_train, batch_size=1, shuffle=False)
+        ds_val = DummyDataset(dataset_dict['val_masks'].reshape(-1), 1)
+        dl_val = DataLoader(ds_val, batch_size=1, shuffle=False)
+        trainer.fit(model, dl_train, dl_val)
 
-            if hasattr(layer, "degree_power"):
-                print("degree power: {:.4}".format(layer.degree_power[0].item()))
-
-    trainer.fit(model, dl_train, dl_val)
-    trainer.test(model, dl_test)
-    results = trainer.predict(model, dl_test, return_predictions=True)
+    if config.get('final', False):
+        ds_test = DummyDataset(dataset_dict['test_masks'].reshape(-1), 1)
+        dl_test = DataLoader(ds_test, batch_size=1, shuffle=False)
+        trainer.test(model, dl_test)
+        results = trainer.predict(model, dl_test, return_predictions=True)
+    else:
+        ds_val = DummyDataset(dataset_dict['val_masks'].reshape(-1), 1)
+        dl_val = DataLoader(ds_val, batch_size=1, shuffle=False)
+        trainer.test(model, dl_val)
+        results = trainer.predict(model, dl_val, return_predictions=True)
 
     for param_name, param_value in model.dgmrf.state_dict().items():
         print("{}: {}".format(param_name, param_value))
@@ -209,20 +243,28 @@ def run_dgmrf(config: DictConfig):
     print(f'noise var = {model.noise_var}')
 
 
-
     ckpt_dir = "checkpoints"
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # save results
     result_path = os.path.join(ckpt_dir, config['experiment'], run.id, 'results')
     os.makedirs(result_path, exist_ok=True)
-
     with open(os.path.join(result_path, 'results.pickle'), 'wb') as f:
         pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     # save as artifact for version control
     artifact = wandb.Artifact(f'results-{run.id}', type='results')
     artifact.add_dir(result_path)
+    run.log_artifact(artifact)
+
+    # save model
+    model_path = os.path.join(ckpt_dir, config['experiment'], run.id, 'models')
+    os.makedirs(model_path, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(model_path, 'model.pt'))
+
+    # save as artifact for version control
+    artifact = wandb.Artifact(f'model-{run.id}', type='models')
+    artifact.add_dir(model_path)
     run.log_artifact(artifact)
 
 
