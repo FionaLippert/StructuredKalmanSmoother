@@ -20,7 +20,8 @@ import pickle
 # import visualization as vis
 from structuredKS.models.dgmrf import *
 import constants_dgmrf as constants
-import utils_dgmrf as utils
+# import utils_dgmrf as utils
+from structuredKS import utils
 from structuredKS.datasets.dummy_dataset import DummyDataset
 from callbacks import *
 
@@ -243,7 +244,7 @@ def run_dgmrf(config: DictConfig):
     print(f'noise var = {model.noise_var}')
 
 
-    ckpt_dir = "checkpoints"
+    ckpt_dir = osp.joint(config['output_dir'], "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # save results

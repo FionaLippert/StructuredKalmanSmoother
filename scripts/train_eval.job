@@ -1,0 +1,19 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_shared
+#SBATCH --job_name=train_eval
+#SBATCH --time=120:00:00
+#SBATCH --output=slurm_output_%A_%a.out
+#SBATCH --mail-type=BEGIN,END
+#SBATCH --mail-user=f.lippert@uva.nl
+
+source activate stdgmrf
+
+OUTPUTDIR=$1
+
+cp -r $HOME/StructuredKalmanSmoother/datasets/ $TMPDIR
+mkdir -p $TMPDIR/$OUTPUTDIR
+
+
+
+cp -r $TMPDIR/$OUTPUTDIR $HOME/StructuredKalmanSmoother/results

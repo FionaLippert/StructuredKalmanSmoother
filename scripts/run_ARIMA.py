@@ -98,6 +98,7 @@ def run_baselines(config: DictConfig):
     run.log_artifact(artifact)
 
     print(f'val nodes = {dataset_dict["val_masks"].sum(0).nonzero().flatten()}')
+    print(f'test nodes = {dataset_dict["test_masks"].sum(0).nonzero().flatten()}')
 
 
 if __name__ == "__main__":
