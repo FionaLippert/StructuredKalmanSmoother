@@ -1,19 +1,38 @@
 #!/bin/bash
 
-#SBATCH --partition=gpu_shared
-#SBATCH --job_name=train_eval
-#SBATCH --time=120:00:00
+#SBATCH --partition=gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --gpus=1
+#SBATCH --job-name=train_eval
+#SBATCH --time=0:05:00
 #SBATCH --output=slurm_output_%A_%a.out
 #SBATCH --mail-type=BEGIN,END
 #SBATCH --mail-user=f.lippert@uva.nl
 
 source activate stdgmrf
 
-OUTPUTDIR=$1
+cd $HOME/StructuredKalmanSmoother
 
-cp -r $HOME/StructuredKalmanSmoother/datasets/ $TMPDIR
+which python
+
+# cp -r $HOME/StructuredKalmanSmoother/datasets/ $TMPDIR
 mkdir -p $TMPDIR/$OUTPUTDIR
 
+mkdir -p $TMPDIR/$OUTPUTDIR/test
 
+nvidia-smi
+
+# wandb setup
+WANDB_DIR=$TMPDIR/wandb_runs
+mkdir -p $WANDB_DIR
+WANDB_MODE="offline"
+
+# srun scripts/test_slurm.py > out.txt
+# WANDB_RUN=$(awk 'something smart to grab wandb_run_id' out.txt)
+
+wandb sync $WANDB_RUN
 
 cp -r $TMPDIR/$OUTPUTDIR $HOME/StructuredKalmanSmoother/results
+cp -r $WANDB_DIR $HOME/StructuredKalmanSmoother/
