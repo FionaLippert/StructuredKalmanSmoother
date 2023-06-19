@@ -5,11 +5,38 @@ import scipy.linalg as spl
 import scipy.stats as sps
 import torch_geometric as ptg
 import os
+import pickle
 import numpy as np
 
 def seed_all(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def load_dataset(ds_name, ds_dir, device='auto'):
+    ds_dir_path = os.path.join(ds_dir, ds_name)
+
+    # Pickled object might be on other device
+    if not device == 'cpu' and torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
+    graphs = {}
+    for filename in os.listdir(ds_dir_path):
+        if filename[0] != ".": # Ignore hidden files
+            var_name, ending = filename.split(".")
+
+            if ending == "pickle":
+                graph_path = os.path.join(ds_dir_path, filename)
+                with open(graph_path, "rb") as graph_file:
+                    graph = pickle.load(graph_file)
+                if isinstance(graph, list) or isinstance(graph, dict):
+                    graphs[var_name] = graph
+                else:
+                    graphs[var_name] = graph.to(device)
+
+    return graphs
 
 
 def crps_score(pred_mean, pred_std, target):

@@ -3,6 +3,7 @@ import torch_geometric as ptg
 import numpy as np
 import json
 import os
+import os.path as osp
 import time
 import argparse
 import wandb
@@ -76,7 +77,6 @@ def run_dgmrf(config: DictConfig):
         device = 'cpu'
 
     print('setup wandb')
-
 
     # Init wandb
     wandb_name = f"{config['transition_type']}-" \
@@ -244,13 +244,13 @@ def run_dgmrf(config: DictConfig):
     print(f'noise var = {model.noise_var}')
 
 
-    ckpt_dir = osp.joint(config['output_dir'], "checkpoints")
+    ckpt_dir = osp.join(config['output_dir'], "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # save results
-    result_path = os.path.join(ckpt_dir, config['experiment'], run.id, 'results')
+    result_path = osp.join(ckpt_dir, config['experiment'], run.id, 'results')
     os.makedirs(result_path, exist_ok=True)
-    with open(os.path.join(result_path, 'results.pickle'), 'wb') as f:
+    with open(osp.join(result_path, 'results.pickle'), 'wb') as f:
         pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     # save as artifact for version control
@@ -259,7 +259,7 @@ def run_dgmrf(config: DictConfig):
     run.log_artifact(artifact)
 
     # save model
-    model_path = os.path.join(ckpt_dir, config['experiment'], run.id, 'models')
+    model_path = osp.join(ckpt_dir, config['experiment'], run.id, 'models')
     os.makedirs(model_path, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(model_path, 'model.pt'))
 

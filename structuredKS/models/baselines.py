@@ -108,7 +108,7 @@ class NodeARIMA(pl.LightningModule):
         if self.final_prediction:
             # use all data except for test data
             # data_mask = torch.logical_and(self.mask, torch.logical_not(test_mask).flatten())
-            data_mask = torch.logical_not(test_mask.flatten())
+            data_mask = torch.logical_and(self.mask, torch.logical_not(test_mask.flatten()))
             split = 'test'
         else:
             # only use dedicated training data (neither validation nor test data)
@@ -126,7 +126,7 @@ class NodeARIMA(pl.LightningModule):
         if self.final_prediction:
             # use all data except for test data
             # data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask).flatten())
-            data_mask = torch.logical_not(predict_mask.flatten)
+            data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask.flatten()))
         else:
             # only use dedicated training data (neither validation nor test data)
             data_mask = self.train_mask
