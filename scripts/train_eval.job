@@ -13,7 +13,7 @@
 
 source activate stdgmrf
 
-cd $HOME/StructuredKalmanSmoother
+cd $HOME/StructuredKalmanSmoother/scripts
 
 which python
 
@@ -27,7 +27,7 @@ nvidia-smi
 # don't sync while running on compute nodes
 export WANDB_MODE="offline"
 
-srun scripts/test_slurm.py
+srun python test_slurm.py
 
 # sync after completion
 wandb sync --sync-all
