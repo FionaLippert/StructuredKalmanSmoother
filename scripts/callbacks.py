@@ -259,7 +259,7 @@ class GraphInferenceCallback(Callback):
 
 
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_validation_batch_end(self, trainer, pl_module, outputs, *args):
 
         # vi_mean = pl_module.vi_dist.mean_param.reshape(pl_module.T, -1)
         vi_mean, vi_std = pl_module.vi_dist.posterior_estimate(pl_module.noise_var)

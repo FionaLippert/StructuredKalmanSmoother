@@ -4,6 +4,7 @@ command:
   - ${env}
   - ${interpreter}
   - ${program}
+  - n_iterations=100
   - ${args_no_hyphens}
 method: grid
 metric:
@@ -11,9 +12,9 @@ metric:
   goal: minimize
 parameters:
   seed:
-    values: [0, 1, 2, 3, 4]
+    values: [0, 1] #, 2, 3, 4]
   n_layers:
-    values: [2]
+    values: [1, 2]
   use_dynamics:
     values: [true]
   independent_time:
@@ -24,9 +25,9 @@ parameters:
     values: [1]
 #    values: [1, 2, 4, 8]
   use_vi_dynamics:
-    values: [ true, false ]
-  dataset:
-    values: ['"spatiotemporal_30x30_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_0"']
+    values: [ true ]
+    #dataset:
+    #values: ['"spatiotemporal_30x30_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_0"']
   final:
     values: [true]
 
