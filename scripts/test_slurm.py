@@ -41,10 +41,10 @@ def run_dgmrf():
     print('setup wandb')
 
     # run wandb offline and sync later
-    os.environ["WANDB_MODE"] = "offline"
+    # os.environ["WANDB_MODE"] = "offline"
 
     # Init wandb
-    wandb_name = f"test"
+    wandb_name = f"test2"
     run = wandb.init(project='test_slurm', name=wandb_name)
 
 if __name__ == "__main__":

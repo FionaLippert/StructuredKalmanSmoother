@@ -18,21 +18,19 @@ cd $HOME/StructuredKalmanSmoother
 which python
 
 # cp -r $HOME/StructuredKalmanSmoother/datasets/ $TMPDIR
-mkdir -p $TMPDIR/$OUTPUTDIR
 
-mkdir -p $TMPDIR/$OUTPUTDIR/test
+#mkdir -p $TMPDIR/$OUTPUTDIR
+#mkdir -p $TMPDIR/$OUTPUTDIR/test
 
 nvidia-smi
 
-# wandb setup
-WANDB_DIR=$TMPDIR/wandb_runs
-mkdir -p $WANDB_DIR
-WANDB_MODE="offline"
+# don't sync while running on compute nodes
+export WANDB_MODE="offline"
 
-# srun scripts/test_slurm.py > out.txt
-# WANDB_RUN=$(awk 'something smart to grab wandb_run_id' out.txt)
+srun scripts/test_slurm.py
 
-wandb sync $WANDB_RUN
+# sync after completion
+wandb sync --sync-all
 
-cp -r $TMPDIR/$OUTPUTDIR $HOME/StructuredKalmanSmoother/results
-cp -r $WANDB_DIR $HOME/StructuredKalmanSmoother/
+#cp -r $TMPDIR/$OUTPUTDIR $HOME/StructuredKalmanSmoother/results
+#cp -r $WANDB_DIR $HOME/StructuredKalmanSmoother/
