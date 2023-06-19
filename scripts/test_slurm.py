@@ -33,12 +33,16 @@ def seed_all(seed):
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
-
-def run_dgmrf():
+@hydra.main(config_path="conf", config_name="config")
+def run_dgmrf(config: DictConfig):
 
     print(f'hydra working dir: {os.getcwd()}')
 
+    print(config)
+
     print('setup wandb')
+
+    os.makedirs(config.output_dir, exist_ok=True)
 
     # run wandb offline and sync later
     # os.environ["WANDB_MODE"] = "offline"
