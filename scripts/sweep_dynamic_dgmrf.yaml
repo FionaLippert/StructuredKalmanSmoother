@@ -4,6 +4,7 @@ command:
   - ${env}
   - ${interpreter}
   - ${program}
+  - n_iterations=100
   - ${args_no_hyphens}
   - learn_noise_std=True
   - use_dynamics=True
@@ -16,7 +17,7 @@ metric:
   goal: minimize
 parameters:
   seed:
-    values: [0, 1, 2, 3, 4]
+    values: [0, 1] #, 2, 3, 4]
   n_layers:
     values: [1, 2, 3, 4]
   transition_type:

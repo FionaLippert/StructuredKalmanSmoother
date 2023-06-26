@@ -60,7 +60,7 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 def run_dgmrf(config: DictConfig):
 
     print(f'hydra working dir: {os.getcwd()}')
-
+    print(config)
     seed_all(config['seed'])
 
     if not config['device'] == "cpu" and torch.cuda.is_available():
