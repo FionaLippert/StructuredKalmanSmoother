@@ -5,23 +5,23 @@ command:
   - ${interpreter}
   - ${program}
   - ${args_no_hyphens}
+  - use_dynamics=False
+  - transition_type=none
+  - use_vi_dynamics=False
+  - learn_noise_std=True
+  - final=True
 method: grid
 metric:
-  name: test_rmse_cg
+  name: test_rmse
   goal: minimize
 parameters:
   seed:
     values: [0, 1, 2, 3, 4]
-#  lr:
-#    values: [0.1, 0.01]
   n_layers:
-    values: [1, 2, 3]
-  use_dynamics:
-    values: [false]
+    values: [1, 2, 3, 4]
   independent_time:
     values: [false, true]
-  use_vi_dynamics:
-    values: [ false ]
   dataset:
-    values: ['"spatiotemporal_30x30_obs=0.875_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_0"']
+    values: ["AQ_PM25_T=400_2015_3_log=True_mask=spatial_block_0.62",
+             "AQ_PM25_T=400_2015_3_log=True_mask=all_temporal_0.9"]
 

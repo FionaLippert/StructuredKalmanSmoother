@@ -1,4 +1,5 @@
 import torch
+from torch.nn.parameter import Parameter
 import torch_geometric as ptg
 import copy
 import numpy as np
@@ -361,6 +362,10 @@ class DGMRF(torch.nn.Module):
     def __init__(self, config, graph, T=1, shared='all', weighted=False):
         super(DGMRF, self).__init__()
 
+        self.edge_index = graph['edge_index']
+        self.num_nodes = get_num_nodes(self.edge_index)
+        self.T = T
+
         layer_list = []
         for layer_i in range(config["n_layers"]):
             layer_list.append(DGMRFLayerMultiChannel(config, graph, vi_layer=False, T=T,
@@ -389,17 +394,96 @@ class DGMRF(torch.nn.Module):
     def log_det(self):
         return sum([layer.log_det() for layer in self.layers])
 
+    def get_matrices(self):
+        input = torch.eye(self.num_nodes).reshape(self.num_nodes, 1, self.num_nodes).repeat(1, 2, 1)
+        all_Q = self.forward(input, transpose=True, with_bias=False)
+
+        Q_0 = all_Q[:, 0].squeeze()
+        Q_t = all_Q[:, 1].squeeze()
+
+        return Q_0, Q_t
+
+    def get_inv_matrices(self):
+        Q_0, Q_t = self.get_matrices()
+
+        Q_0_inv = torch.inverse(Q_0)
+        Q_t_inv = torch.inverse(Q_t)
+
+        return Q_0_inv, Q_t_inv
+
+
+class DiagonalModel(torch.nn.Module):
+    def __init__(self, config, graph, T=1, shared='all', **kwargs):
+        super(DiagonalModel, self).__init__()
+
+        self.edge_index = graph['edge_index']
+        self.num_nodes = get_num_nodes(self.edge_index)
+        self.T = T
+
+        self.shared = shared
+
+        self.precision_param = Parameter(torch.rand(2, 1) if self.shared == 'dynamics' else torch.rand(1))
+        self.bias_param = Parameter(torch.rand(2, 1) * 2 - 1 if self.shared == 'dynamics' else torch.rand(1) * 2 - 1)
+
+    @property
+    def precision(self):
+        if self.shared == 'dynamics':
+            # use same parameters for time steps 1,...,T
+            return torch.cat([self.precision_param[0], self.precision_param[1].repeat(self.T - 1)]).unsqueeze(-1)
+        else:
+            # use same parameters for all time steps 0, 1, ..., T
+            return self.precision_param.repeat(self.T).unsqueeze(-1)
+
+    @property
+    def bias(self):
+        if self.shared == 'dynamics':
+            # use same parameters for time steps 1,...,T
+            return torch.cat([self.bias_param[0], self.bias_param[1].repeat(self.T - 1)]).unsqueeze(-1)
+        else:
+            # use same parameters for all time steps 0, 1, ..., T
+            return self.bias_param.repeat(self.T).unsqueeze(-1)
+
+    def forward(self, x, with_bias=True, **kwargs):
+        # x has shape [..., T, num_nodes]
+
+        x = self.precision * x
+        if with_bias:
+            x = x + self.bias
+
+        return x
+
+    def log_det(self):
+        return self.num_nodes * self.precision.sum()
+
+    def get_matrices(self):
+
+        Q_0 = torch.eye(self.num_nodes) * self.precision[0]
+        Q_t = torch.eye(self.num_nodes) * self.precision[-1]
+
+        return Q_0, Q_t
+
+    def get_inv_matrices(self):
+
+        Q_0_inv = torch.eye(self.num_nodes) / self.precision[0]
+        Q_t_inv = torch.eye(self.num_nodes) / self.precision[-1]
+
+        return Q_0_inv, Q_t_inv
+
 
 class JointDGMRF(torch.nn.Module):
-    def __init__(self, config, spatial_graph, temporal_graph=None, T=1, shared='dynamics', weighted=False):
+    def __init__(self, config, spatial_graph, temporal_graph=None, T=1, shared='dynamics',
+                 weighted=False, features=None):
         super().__init__()
 
-        self.dgmrf = DGMRF(config, spatial_graph, T=T, shared=shared, weighted=weighted)
+        if config.get('diag_noise_model', False):
+            self.dgmrf = DiagonalModel(config, spatial_graph, T=T, shared=shared)
+        else:
+            self.dgmrf = DGMRF(config, spatial_graph, T=T, shared=shared, weighted=weighted)
         self.T = T
 
         if temporal_graph is not None:
             self.dynamics = torch.nn.ModuleList([
-                TemporalDGMRF(config, spatial_graph, temporal_graph, T=T, shared=shared)
+                TemporalDGMRF(config, spatial_graph, temporal_graph, T=T, shared=shared, features=features)
                 for _ in range(config.get('n_layers_temporal', 1))])
 
     def forward(self, x, transpose=False, with_bias=True, **kwargs):
@@ -409,7 +493,7 @@ class JointDGMRF(torch.nn.Module):
             for p, layer in enumerate(self.dynamics):
                 out = out - layer(x, with_bias=with_bias, p=p+1) #v=kwargs.get('v', None))
 
-        z = self.dgmrf(out, transpose, with_bias)
+        z = self.dgmrf(out, transpose=transpose, with_bias=with_bias)
 
         out = z
 
@@ -420,21 +504,18 @@ class JointDGMRF(torch.nn.Module):
 
         return out
 
-    def get_matrices(self, num_nodes):
-        # make sure that dynamics model is first-order Markov process
-        assert len(self.dynamics) == 1
-        assert self.T > 1
+    def get_matrices(self):
 
-        F_t = self.dynamics[0](torch.eye(num_nodes).reshape(num_nodes, 1, num_nodes), transpose=True,
-                           with_bias=False).squeeze()
+        return self.dgmrf.get_matrices()
 
-        all_Q = self.dgmrf(torch.eye(num_nodes).reshape(num_nodes, 1, num_nodes).repeat(1, self.T, 1),
-                         transpose=True, with_bias=False)
+    def get_inv_matrices(self):
 
-        Q_0 = all_Q[:, 0].squeeze()
-        Q_t = all_Q[:, 1].squeeze()
+        return self.dgmrf.get_inv_matrices()
 
-        return Q_0, Q_t, F_t
+    def get_transition_matrix(self, p=1):
+        assert len(self.dynamics) >= p
+
+        return self.dynamics[p-1].get_matrix()
 
     def log_det(self):
         return self.dgmrf.log_det()
@@ -665,16 +746,19 @@ class ARModelMultiChannel(torch.nn.Module):
 
 
 class GNNAdvection(ptg.nn.MessagePassing):
-    def __init__(self, config, temporal_graph, **kwargs):
+    def __init__(self, config, temporal_graph, n_features=0, **kwargs):
         super(GNNAdvection, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
 
         self.edge_index = temporal_graph['edge_index']
         self.edge_index_transpose = self.edge_index.flip(0)
-        self.edge_attr = temporal_graph['edge_attr'] #[:2] # normal vectors
+        edge_attr = temporal_graph['edge_attr'] #[:2] # normal vectors
+        edge_weights = temporal_graph.get('edge_weight', torch.ones(edge_attr.size(0)))
+        self.edge_features = torch.cat([edge_attr, edge_weights.unsqueeze(1)], dim=1).to(torch.float32)
 
-        self.edge_dim = self.edge_attr.size(-1)
+        self.edge_dim = self.edge_features.size(1)
+        self.n_features = n_features
 
-        self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim, 10),
+        self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim + n_features, 10),
                                             torch.nn.ReLU(),
                                             torch.nn.Linear(10, 2),
                                             torch.nn.Tanh())
@@ -685,14 +769,25 @@ class GNNAdvection(ptg.nn.MessagePassing):
     def diff_coeff(self):
         return torch.pow(self.diff_param, 2)
 
-    def forward(self, x, transpose=False, input_states=None):
+    def forward(self, x, transpose=False, features=None, **kwargs):
         # x has shape [num_samples, T, num_nodes]
-        agg_i, agg_j = self.propagate(self.edge_index, x=x, edge_attr=self.edge_attr,
-                                      transpose=transpose)
+        if features is None:
+            agg_i, agg_j = self.propagate(self.edge_index, x=x, edge_attr=self.edge_features,
+                                          transpose=transpose)
+        else:
+            assert features.size(-1) == self.n_features
+            agg_i, agg_j = self.propagate(self.edge_index, x=x, edge_attr=self.edge_features,
+                                          node_attr=features.transpose(1, 2), transpose=transpose)
 
         if transpose:
-            _, aggT_j = self.propagate(self.edge_index_transpose, x=x, edge_attr=self.edge_attr,
-                                       transpose=transpose)
+            if features is None:
+                _, aggT_j = self.propagate(self.edge_index_transpose, x=x, edge_attr=self.edge_features,
+                                           transpose=transpose)
+            else:
+                assert features.size(-1) == self.n_features
+                _, aggT_j = self.propagate(self.edge_index_transpose, x=x, edge_attr=self.edge_features,
+                                           node_attr=features.transpose(1, 2), transpose=transpose)
+
             new_x = x + aggT_j + agg_i
         else:
             new_x = x + agg_j + agg_i
@@ -700,12 +795,16 @@ class GNNAdvection(ptg.nn.MessagePassing):
         return new_x
 
 
-    def message(self, x_i, x_j, edge_attr, transpose):
+    def message(self, x_i, x_j, edge_attr, transpose, node_attr_i=None, node_attr_j=None):
         # if transpose:
         #       inputs = torch.cat([edge_attr, node_attr_j.squeeze(0).T, node_attr_i.squeeze(0).T], dim=-1)
         # else:
         #       inputs = torch.cat([edge_attr, node_attr_i.squeeze(0).T, node_attr_j.squeeze(0).T], dim=-1)
-        inputs = edge_attr
+        if node_attr_i is None or node_attr_j is None:
+            inputs = edge_attr
+        else:
+            edge_attr = edge_attr.unsqueeze(0).repeat(node_attr_i.size(0), 1, 1)
+            inputs = torch.cat([edge_attr, (node_attr_j + node_attr_i).transpose(1, 2)], dim=-1)
 
         # inputs = torch.cat([inputs.reshape(1, 1, *inputs.shape).repeat(x_i.size(0), x_i.size(1), 1, 1),
         #                     input_states_i.unsqueeze(-1) + input_states_j.unsqueeze(-1)], dim=-1)
@@ -716,6 +815,56 @@ class GNNAdvection(ptg.nn.MessagePassing):
         msg_j = (coeffs[..., 0] + self.diff_coeff) * x_j
 
         return torch.stack([msg_i, msg_j], dim=0)
+
+class GNNTransition(ptg.nn.MessagePassing):
+    def __init__(self, config, temporal_graph, n_features, **kwargs):
+        super(GNNTransition, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
+
+        self.edge_index = temporal_graph['edge_index']
+        self.edge_index_transpose = self.edge_index.flip(0)
+        edge_attr = temporal_graph['edge_attr'] #[:2] # normal vectors
+        edge_weights = temporal_graph.get('edge_weight', torch.ones(edge_attr.size(0)))
+        self.edge_features = torch.cat([edge_attr, edge_weights.unsqueeze(1)], dim=1).to(torch.float32)
+
+        self.edge_dim = self.edge_features.size(1)
+        self.n_features = n_features
+
+        self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim + n_features, 10),
+                                            torch.nn.ReLU(),
+                                            torch.nn.Linear(10, 1),
+                                            torch.nn.Tanh())
+
+        # self.diff_param = torch.nn.Parameter(2 * torch.rand(1,) - 1)
+    #
+    # @property
+    # def diff_coeff(self):
+    #     return torch.pow(self.diff_param, 2)
+
+    def forward(self, x, transpose=False, features=None):
+        assert features.size(-1) == self.n_features
+        # x has shape [num_samples, T, num_nodes]
+        # features has shape [T, num_nodes, num_features]
+        edge_index = self.edge_index_transpose if transpose else self.edge_index
+        agg = self.propagate(edge_index, x=x, node_attr=features.transpose(1, 2),
+                             edge_attr=self.edge_features, transpose=transpose)
+
+        new_x = x + agg # TODO: also use self-weight? i.e. F_ii != 1
+
+        return new_x
+
+
+    def message(self, x_j, node_attr_i, node_attr_j, edge_attr, transpose):
+        # edge_attr has shape [num_edges, num_features]
+        # covariates has shape [T, num_features, num_edges]
+
+        edge_attr = edge_attr.unsqueeze(0).repeat(node_attr_i.size(0), 1, 1)
+        inputs = torch.cat([edge_attr, (node_attr_j + node_attr_i).transpose(1, 2)], dim=-1)
+
+        coeffs = self.edge_mlp(inputs).squeeze(-1)
+
+        msg = coeffs * x_j
+
+        return msg
 
 
 class AdvectionDiffusionModel(ptg.nn.MessagePassing):
@@ -831,8 +980,12 @@ class AdvectionModel(ptg.nn.MessagePassing):
 
 
 class TemporalDGMRF(torch.nn.Module):
-    def __init__(self, config, spatial_graph, temporal_graph, **kwargs):
+    def __init__(self, config, spatial_graph, temporal_graph, features=None, **kwargs):
         super().__init__()
+
+        self.num_nodes = get_num_nodes(spatial_graph['edge_index'])
+
+        self.features = features
 
         self.vi_layer = kwargs.get('vi_layer', False)
         if self.vi_layer:
@@ -854,7 +1007,11 @@ class TemporalDGMRF(torch.nn.Module):
             self.transition_models = torch.nn.ModuleList([AdvectionModel(config, temporal_graph)
                                                           for _ in range(self.n_transitions)])
         elif self.transition_type == 'GNN_advection':
-            self.transition_models = torch.nn.ModuleList([GNNAdvection(config, temporal_graph)
+            if features is None:
+                n_features = 0
+            else:
+                n_features = features.size(-1)
+            self.transition_models = torch.nn.ModuleList([GNNAdvection(config, temporal_graph, n_features)
                                                           for _ in range(self.n_transitions)])
         elif self.transition_type == 'advection+diffusion':
             self.transition_models = torch.nn.ModuleList([AdvectionDiffusionModel(config, temporal_graph)
@@ -863,7 +1020,10 @@ class TemporalDGMRF(torch.nn.Module):
             self.transition_models = torch.nn.ModuleList([InhomogeneousAdvectionDiffusionModel(config, temporal_graph)
                                                           for _ in range(self.n_transitions)])
         elif self.transition_type == 'GNN':
-            self.transition_models = torch.nn.ModuleList([GNNTransition(config, spatial_graph, temporal_graph, **kwargs)
+            assert features is not None
+            n_features = features.size(-1)
+            self.transition_models = torch.nn.ModuleList([GNNTransition(config, temporal_graph,
+                                                                        n_features, **kwargs)
                                                           for _ in range(self.n_transitions)])
         elif self.transition_type == 'flow':
             self.transition_models = torch.nn.ModuleList([FlowModel(config, temporal_graph)
@@ -888,10 +1048,11 @@ class TemporalDGMRF(torch.nn.Module):
 
         if transpose:
             states = x[:, p:]
+            features = self.features[p:] if self.features is not None else None
             layers = reversed(self.transition_models)
-
         else:
             states = x[:, :-p]
+            features = self.features[:-p] if self.features is not None else None
             layers = self.transition_models
 
         if with_bias:
@@ -905,7 +1066,7 @@ class TemporalDGMRF(torch.nn.Module):
                 #     v = kwargs.get('v').unsqueeze(2).repeat(1, 1, states.size(1), 1)  # shape [2, n_samples, T-1, num_nodes]
                 #     states = self.transition_model(states, v=v, transpose=transpose)
                 # else:
-                states = layer(states, transpose=transpose)
+                states = layer(states, transpose=transpose, features=features)
 
             # if with_bias:
             #     states = states + self.bias
@@ -921,9 +1082,12 @@ class TemporalDGMRF(torch.nn.Module):
 
         return states
 
-    def get_matrix(self, num_nodes):
-        F_t = self.forward(torch.eye(num_nodes).reshape(1, 1, num_nodes, num_nodes), transpose=True, with_bias=False)
-        return F_t
+    def get_matrix(self, dtype=torch.float32):
+        # F_t = self.forward(torch.eye(num_nodes).reshape(1, 1, num_nodes, num_nodes), transpose=True, with_bias=False)
+        F_t = self.forward(torch.eye(self.num_nodes).reshape(self.num_nodes, 1, self.num_nodes),
+                           transpose=True, with_bias=False, p=0).squeeze()
+
+        return F_t.to(dtype)
 
 
 # # TODO: write parent class for all jointDGMRFs defined by a dict of DGMRFs and time associated indices
@@ -1185,15 +1349,6 @@ class SpatiotemporalInference(pl.LightningModule):
         self.y_masked = torch.zeros(self.mask.size(), dtype=self.y.dtype) #* np.nan
         self.y_masked[self.mask] = self.y
 
-        if config.get('use_KS', False):
-            all_H = []
-            for t in range(T):
-                jdx = self.mask[t*self.num_nodes: (t+1)*self.num_nodes].flatten().nonzero().squeeze()
-                H_t = torch.eye(self.num_nodes)
-                H_t = H_t[jdx, :]
-                all_H.append(H_t)
-            self.all_H = torch.stack(all_H, dim=0)
-
         self.pos = spatial_graph.get('pos', None)
         if not gt is None:
             self.gt = gt # shape [T * num_nodes]
@@ -1208,13 +1363,10 @@ class SpatiotemporalInference(pl.LightningModule):
         self.use_hierarchy = config.get("use_hierarchy", False)
         self.use_vi_dynamics = config.get('use_vi_dynamics', False)
 
-        if config.get("use_features", False) and features is not None:
-            self.use_features = True
-            self.features = features # shape [T * num_nodes, num_features]
-        else:
-            self.use_features = False
-            self.features = None
-            print('No node features used')
+        self.features = features
+
+        self.use_features = config.get("use_features", False) and features is not None
+        self.use_features_dynamics = config.get("use_features_dynamics", False) and features is not None
 
         self.data_mean = kwargs.get('data_mean', 0)
         self.data_std = kwargs.get('data_std', 1)
@@ -1223,8 +1375,9 @@ class SpatiotemporalInference(pl.LightningModule):
         if self.use_dynamics:
 
             shared = 'none' if config.get('independent_time', True) else 'dynamics'
+            features = self.features.reshape(self.T, self.num_nodes, -1) if self.use_features_dynamics else None
             self.dgmrf = JointDGMRF(config, spatial_graph, temporal_graph, T=self.T, shared=shared,
-                                    weighted=config.get('weighted_dgmrf', False))
+                                    weighted=config.get('weighted_dgmrf', False), features=features)
 
             self.input_shape = [self.T, self.num_nodes]
             shared_vi = 'none'
@@ -1274,6 +1427,50 @@ class SpatiotemporalInference(pl.LightningModule):
     @property
     def log_noise_std(self):
         return 0.5 * self.noise_var.log()
+
+    def all_H(self, mask):
+        # mask has shape [T * num_nodes]
+        # output should have shape [T, num_observed_nodes, num_nodes]
+        # obs_nodes = mask.reshape(self.T, -1).sum(0).nonzero().squeeze()
+
+        # stacked_H = torch.eye(self.num_nodes).unsqueeze(0).repeat(self.T, 1, 1)
+        # stacked_H = stacked_H[:, obs_nodes, :] # nodes that are observed at any time point
+
+        # sub_mask = (stacked_H @ mask.view(self.T, -1, 1).to(torch.float32)).squeeze(-1)
+        # unobs_nodes = (sub_mask - 1).nonzero()
+
+        identity = torch.eye(self.num_nodes)
+        all_H = []
+
+        # adjust for each time step
+        for t in range(self.T):
+            # get unobserved nodes for time t
+            jdx = (mask.view(self.T, -1)[t].to(torch.float32).flatten() - 1).nonzero().squeeze()
+
+            all_H.append(identity[jdx, :].unsqueeze(0))
+            # jdx = (sub_mask[t] - 1).nonzero().squeeze()
+
+            # stacked_H[t_idx, n_idx] = 0
+
+        return all_H
+
+    def stacked_H(self, mask):
+        # mask has shape [T * num_nodes]
+        # output should have shape [T, num_observed_nodes, num_nodes]
+        obs_nodes = mask.reshape(self.T, -1).sum(0).nonzero().squeeze()
+
+        stacked_H = torch.eye(self.num_nodes).unsqueeze(0).repeat(self.T, 1, 1)
+        stacked_H = stacked_H[:, obs_nodes, :] # nodes that are observed at any time point
+
+        sub_mask = (stacked_H @ mask.view(self.T, -1, 1).to(torch.float32)).squeeze(-1)
+        unobs_nodes = (sub_mask - 1).nonzero()
+
+        # adjust for each time step
+        for tidx, nidx in unobs_nodes:
+            # get unobserved nodes for time t
+            stacked_H[tidx, nidx] = 0
+
+        return stacked_H
 
     def _reconstruction_loss(self, x, mask):
         # x has shape [n_samples, T * n_nodes]
@@ -1327,7 +1524,7 @@ class SpatiotemporalInference(pl.LightningModule):
 
         return prior_ll + data_ll
 
-    def KS_ELBO(self, mu_0, Q_0, mu_s, cov_s, cov_s_lag, F_t, Q_t, data, all_H):
+    def KS_ELBO(self, mu_0, Q_0, mu_s, cov_s, cov_s_lag, F_t, Q_t, data, stacked_H):
         # mu_0 has shape [num_nodes]
         # Q_0 has shape [num_nodes, num_nodes]
         # mu_s has shape [T, num_nodes]
@@ -1350,11 +1547,11 @@ class SpatiotemporalInference(pl.LightningModule):
 
         # compute E_{x|y}[p(y|x)]
         data = data.unsqueeze(-1)
-        data_term = -0.5 * (((all_H @ data).transpose(-1, -2) @ all_H @ data) / self.noise_var \
-                            + ((all_H @ (cov_s + mu_s @ mu_s.transpose(-1, -2)) @ all_H.transpose(-1, -2)) \
+        data_term = -0.5 * (((stacked_H @ data).transpose(-1, -2) @ stacked_H @ data) / self.noise_var \
+                            + ((stacked_H @ (cov_s + mu_s @ mu_s.transpose(-1, -2)) @ stacked_H.transpose(-1, -2)) \
                                / self.noise_var).diagonal(offset=0, dim1=-1, dim2=-2)
-                            - (2 * (all_H @ data).transpose(-1, -2) @ all_H @ mu_s) / self.noise_var).sum() \
-                    - all_H.sum() * self.log_noise_std
+                            - (2 * (stacked_H @ data).transpose(-1, -2) @ stacked_H @ mu_s) / self.noise_var).sum() \
+                    - stacked_H.sum() * self.log_noise_std
 
         return prior_term + data_term
 
@@ -1367,25 +1564,30 @@ class SpatiotemporalInference(pl.LightningModule):
         self.train_mask = train_mask.squeeze(0)
 
         if self.config.get('use_KS', False):
-            Q_0, Q_t, F_t = self.dgmrf.get_matrices(self.num_nodes)
+            Q_0, Q_t = self.dgmrf.get_matrices() # all have shape [num_nodes, num_nodes]
+            F_t = self.dgmrf.get_transition_matrix()
             # assume mu_0 and c_t are all zero
             mu_0 = torch.zeros(self.num_nodes)
             # R_t = self.noise_var * torch.eye(self.num_nodes)
 
-            Q_0_inv = torch.inverse(Q_0)
-            Q_t_inv = torch.inverse(Q_t)
+            Q_0_inv, Q_t_inv = self.dgmrf.get_inv_matrices()
 
-            data = self.y_masked.reshape(self.T, -1) * self.train_mask
+            data = (self.y_masked * self.train_mask).reshape(self.T, -1)
+
+            all_H = self.all_H(self.train_mask)
+            stacked_H = self.stacked_H(self.train_mask)
 
             ks = KalmanSmoother(mu_0.unsqueeze(0), Q_0_inv.unsqueeze(0), F_t.unsqueeze(0),
-                                Q_t_inv.unsqueeze(0), self.all_H.unsqueeze(0), torch.ones(1,) * self.noise_var)
+                                Q_t_inv.unsqueeze(0), all_H, torch.ones(1,) * self.noise_var)
             mu_s, cov_s, cov_s_lag = ks.smoother(data.unsqueeze(0))
 
             Q_t = Q_t.unsqueeze(0).repeat(self.T - 1, 1, 1)
             F_t = F_t.unsqueeze(0).repeat(self.T - 1, 1, 1)
 
             elbo = self.KS_ELBO(mu_0, Q_0, mu_s.squeeze(0), cov_s.squeeze(0), cov_s_lag.squeeze(0),
-                                F_t, Q_t, data, self.all_H)
+                                F_t, Q_t, data, stacked_H)
+
+            self.log("train_elbo", elbo.item(), sync_dist=True)
 
         else:
             # sample from variational distribution
@@ -1440,7 +1642,7 @@ class SpatiotemporalInference(pl.LightningModule):
 
     def test_step(self, test_mask, *args):
         if self.config.get('use_KS', False):
-            self.KS_inference()
+            self.KS_inference(test_mask.squeeze(0), split='test')
         else:
             self.DGMRF_inference(test_mask.squeeze(0), split='test')
 
@@ -1452,16 +1654,17 @@ class SpatiotemporalInference(pl.LightningModule):
         std = self.vi_std.flatten()
 
         # use held out part of data to evaluate predictions
-        # test_index indexes data space
         data_mask = torch.logical_and(self.mask, torch.logical_not(test_mask))  # all data except test data
 
         # y_masked = torch.zeros_like(self.y_masked)
         # y_masked[data_mask] = self.y_masked[data_mask]
         y_masked = self.y_masked * data_mask
 
-        self.cg_mean, self.cg_std = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
+        self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                         data_mask, self.config, self.noise_var,
                                                         features=self.features)
+
+        self.log('niter_cg', niter, sync_dist=True)
 
         if hasattr(self, 'gt'):
             target = self.gt[test_mask]
@@ -1469,72 +1672,136 @@ class SpatiotemporalInference(pl.LightningModule):
             target = self.y_masked[test_mask]
 
         residuals_vi = (target - mean[test_mask])
-        residuals_cg = target - self.cg_mean.squeeze(-1)[test_mask]
+        residuals_cg = target - self.post_mean.squeeze(-1)[test_mask]
 
         self.log(f"{split}_mae_vi", residuals_vi.abs().mean().item(), sync_dist=True)
         self.log(f"{split}_rmse_vi", torch.pow(residuals_vi, 2).mean().sqrt().item(), sync_dist=True)
         self.log(f"{split}_mape_vi", (residuals_vi / target).abs().mean().item(), sync_dist=True)
 
-        self.log(f"{split}_mae_cg", residuals_cg.abs().mean().item(), sync_dist=True)
-        self.log(f"{split}_rmse_cg", torch.pow(residuals_cg, 2).mean().sqrt().item(), sync_dist=True)
-        self.log(f"{split}_mape_cg", (residuals_cg / target).abs().mean().item(), sync_dist=True)
+        self.log(f"{split}_mae", residuals_cg.abs().mean().item(), sync_dist=True)
+        self.log(f"{split}_rmse", torch.pow(residuals_cg, 2).mean().sqrt().item(), sync_dist=True)
+        self.log(f"{split}_mape", (residuals_cg / target).abs().mean().item(), sync_dist=True)
 
-        pred_mean_np = self.cg_mean.squeeze(-1)[test_mask].cpu().numpy()
-        pred_std_np = self.cg_std.squeeze(-1)[test_mask].cpu().numpy()
+        pred_mean_np = self.post_mean.squeeze(-1)[test_mask].cpu().numpy()
+        pred_std_np = self.post_std.squeeze(-1)[test_mask].cpu().numpy()
         target_np = target.cpu().numpy()
 
-        self.log(f"{split}_crps_cg", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
-        self.log(f"{split}_int_score_cg", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_crps", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_int_score", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
 
 
     def predict_step(self, predict_mask, *args):
 
-        data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask.squeeze(0)))
+        if self.config.get('use_KS', False):
+            self.KS_prediction(predict_mask.squeeze(0))
+        else:
+            self.DGMRF_prediction(predict_mask.squeeze(0))
+
+    def DGMRF_prediction(self, predict_mask):
+
+        data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask))
 
         y_masked = torch.zeros_like(self.y_masked)
         y_masked[data_mask] = self.y_masked[data_mask]
-        # y_masked = self.y_masked * data_mask
 
         if not (hasattr(self, 'vi_mean') or hasattr(self, 'vi_std')):
             self.vi_mean, self.vi_std = self.vi_dist.posterior_estimate(self.noise_var)
 
         if not (hasattr(self, 'cg_mean') or hasattr(self, 'cg_std')):
-            self.cg_mean, self.cg_std = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
+            self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                             data_mask, self.config, self.noise_var,
                                                             features=self.features)
 
         if not hasattr(self, 'cg_samples'):
-            self.cg_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
+            self.post_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                data_mask, self.config, self.noise_var, features=self.features)
 
             if self.use_features:
-                cg_samples_x = self.cg_samples[:, :self.N]
-                cg_samples_beta = self.cg_samples[:, self.N:]
-                self.cg_samples = cg_samples_x + self.features @ cg_samples_beta
+                post_samples_x = self.post_samples[:, :self.N]
+                post_samples_beta = self.post_samples[:, self.N:]
+                self.post_samples = post_samples_x + self.features @ post_samples_beta
 
 
-        return {'cg_mean': self.cg_mean.reshape(self.T, self.num_nodes),
-                'cg_std': self.cg_std.reshape(self.T, self.num_nodes),
-                'cg_samples': self.cg_samples.reshape(-1, self.T, self.num_nodes),
+        return {'post_mean': self.post_mean.reshape(self.T, self.num_nodes),
+                'post_std': self.post_std.reshape(self.T, self.num_nodes),
+                'post_samples': self.post_samples.reshape(-1, self.T, self.num_nodes),
                 'vi_mean': self.vi_mean,
                 'vi_std':  self.vi_std,
-                'data': y_masked,
+                'data': y_masked.reshape(self.T, self.num_nodes),
                 'gt': self.gt if hasattr(self, 'gt') else self.y_masked,
                 'predict_mask': predict_mask}
 
-    def KS_inference(self):
-        Q_0, Q_t, F_t = self.dgmrf.get_matrices(self.num_nodes)
+
+    def KS_inference(self, test_mask, split):
+        # use held out part of data to evaluate predictions
+        data_mask = torch.logical_and(self.mask, torch.logical_not(test_mask))  # all data except test data
+
+        # y_masked = torch.zeros_like(self.y_masked)
+        # y_masked[data_mask] = self.y_masked[data_mask]
+        data = (self.y_masked * data_mask).reshape(self.T, -1)
+        # data = self.y_masked.reshape(self.T, -1)
+
         # assume mu_0 and c_t are all zero
         mu_0 = torch.zeros(self.num_nodes)
 
-        Q_0_inv = torch.inverse(Q_0)
-        Q_t_inv = torch.inverse(Q_t)
+        F_t = self.dgmrf.get_transition_matrix()
+        Q_0_inv, Q_t_inv = self.dgmrf.get_inv_matrices()
 
-        data = self.y_masked.reshape(self.T, -1)
+        all_H = self.all_H(test_mask)
 
         ks = KalmanSmoother(mu_0.unsqueeze(0), Q_0_inv.unsqueeze(0), F_t.unsqueeze(0),
-                            Q_t_inv.unsqueeze(0), self.all_H.unsqueeze(0), torch.ones(1, ) * self.noise_var)
+                            Q_t_inv.unsqueeze(0), all_H, torch.ones(1, ) * self.noise_var)
         mu_s, cov_s, cov_s_lag = ks.smoother(data.unsqueeze(0))
+
+        self.post_mean = mu_s.reshape(-1)
+        self.post_std = torch.diagonal(cov_s, dim1=-2, dim2=-1).squeeze(0).reshape(-1)
+
+        if hasattr(self, 'gt'):
+            target = self.gt[test_mask]
+        else:
+            target = self.y_masked[test_mask]
+
+        residuals = (target - self.post_mean[test_mask])
+
+        self.log(f"{split}_mae", residuals.abs().mean().item(), sync_dist=True)
+        self.log(f"{split}_rmse", torch.pow(residuals, 2).mean().sqrt().item(), sync_dist=True)
+        self.log(f"{split}_mape", (residuals / target).abs().mean().item(), sync_dist=True)
+
+        pred_mean_np = self.post_mean[test_mask].cpu().numpy()
+        pred_std_np = self.post_std[test_mask].cpu().numpy()
+        target_np = target.cpu().numpy()
+
+        self.log(f"{split}_crps", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_int_score", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+
+
+    def KS_prediction(self, predict_mask):
+        # assume mu_0 and c_t are all zero
+
+        data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask))
+
+        data = torch.zeros_like(self.y_masked)
+        data[data_mask] = self.y_masked[data_mask]
+        # data = self.y_masked * data_mask
+        data = data.reshape(self.T, -1)
+
+        mu_0 = torch.zeros(self.num_nodes)
+
+        F_t = self.dgmrf.get_transition_matrix()
+        Q_0_inv, Q_t_inv = self.dgmrf.get_inv_matrices()
+
+        all_H = self.all_H(predict_mask)
+
+        ks = KalmanSmoother(mu_0.unsqueeze(0), Q_0_inv.unsqueeze(0), F_t.unsqueeze(0),
+                            Q_t_inv.unsqueeze(0), all_H, torch.ones(1, ) * self.noise_var)
+        mu_s, cov_s, cov_s_lag = ks.smoother(data.unsqueeze(0))
+
+
+        return {'ks_mean': mu_s.squeeze(0),
+                'ks_std': torch.diagonal(cov_s, dim1=-2, dim2=-1).squeeze(0),
+                'data': data,
+                'gt': self.gt if hasattr(self, 'gt') else self.y_masked,
+                'predict_mask': predict_mask}
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
@@ -1803,6 +2070,8 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None
 
     niter_list.append(cg_info["niter"])
 
+    mean_niter = cg_info["niter"]
+
 
     print(f'draw samples from posterior')
     posterior_samples_list = []
@@ -1832,7 +2101,7 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None
     if return_time:
         return post_mean, post_std, time_per_iter, torch.tensor(niter_list, dtype=torch.float32).mean()
     else:
-        return post_mean, post_std
+        return post_mean, post_std, mean_niter
 
 
 # @torch.no_grad()

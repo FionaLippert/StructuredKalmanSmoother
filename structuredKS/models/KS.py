@@ -19,11 +19,12 @@ class KalmanSmoother:
         self.initial_cov = initial_cov # size [batch, state, state]
         self.F = transition_model # size [batch, state, state]
         self.Q = transition_cov # size [batch, state, state]
-        self.H = observation_models # size [batch, T, data, state]
+        self.H = observation_models # list of tensors with size [batch, data_t, state]
         # self.R = observation_cov # size [batch, data, data]
         self.sigma_obs = observation_noise # size [batch]
 
-        self.batch_dim, self.T, self.data_dim, self.state_dim = self.H.size()
+        self.T = len(self.H)
+        self.batch_dim, self.state_dim = self.initial_mean.size()
 
 
     def EM(self, data, iterations, update=['F', 'Q', 'R', 'mu', 'Sigma']):
@@ -77,7 +78,7 @@ class KalmanSmoother:
                 # last filtered state is same as smoothed state
                 mean_s = mean_filtered[:, tidx]
                 cov_s = cov_filtered[:, tidx]
-                cov_lag1 = (torch.eye(self.state_dim) - last_K @ self.H[:, tidx]) @ transition @ cov_filtered[:, tidx - 1]
+                cov_lag1 = (torch.eye(self.state_dim) - last_K @ self.H[tidx]) @ transition @ cov_filtered[:, tidx - 1]
 
                 C_prev = cov_filtered[:, tidx - 1] @ transition.transpose(1, 2) @ torch.inverse(cov_predicted[:, tidx])
             else:
@@ -130,17 +131,17 @@ class KalmanSmoother:
                 cov_p = (transition @ cov_f @ transition.transpose(1, 2)) + self.Q #.unsqueeze(0)
 
             # Kalman gain
-            K = cov_p @ self.H[:, t].transpose(1, 2) @ torch.inverse((self.H[:, t] @
-                        cov_p @ self.H[:, t].transpose(1, 2)) + self.sigma_obs)
+            K = cov_p @ self.H[t].transpose(1, 2) @ torch.inverse((self.H[t] @
+                        cov_p @ self.H[t].transpose(1, 2)) + self.sigma_obs)
 
             # analysis
 
             #residual = data[:, t] - (self.H @ mean_p.T).T
-            residual = self.H[:, t] @ (data[:, t].unsqueeze(-1) - mean_p.unsqueeze(-1))
+            residual = self.H[t] @ (data[:, t].unsqueeze(-1) - mean_p.unsqueeze(-1))
             innovation = K @ residual #.unsqueeze(-1)
             mean_f = mean_p + innovation.squeeze(-1)
 
-            diff = (torch.eye(self.state_dim) - K @ self.H[:, t])
+            diff = (torch.eye(self.state_dim) - K @ self.H[t])
             cov_f = diff @ cov_p  #@ diff.transpose(1, 2) + K @ self.R @ K.transpose(1, 2)
 
             mean_filtered[:, t] = mean_f

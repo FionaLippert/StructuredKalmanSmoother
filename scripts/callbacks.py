@@ -91,9 +91,9 @@ class LatticeInferenceCallback(Callback):
 
             # cg_mean, cg_std = posterior_inference(pl_module.dgmrf, pl_module.y_masked.reshape(1, *pl_module.input_shape),
             #                                       pl_module.mask, self.config, pl_module.noise_var)
-            cg_mean, cg_std = pl_module.cg_mean, pl_module.cg_std
-            cg_mean = cg_mean.reshape(img_shape).cpu().detach()
-            cg_std = cg_std.reshape(img_shape).cpu().detach()
+            post_mean, post_std = pl_module.post_mean, pl_module.post_std
+            post_mean = post_mean.reshape(img_shape).cpu().detach()
+            post_std = post_std.reshape(img_shape).cpu().detach()
 
             # cg_samples = sample_posterior(10, pl_module.dgmrf, pl_module.y_masked.reshape(1, *pl_module.input_shape),
             #                     pl_module.mask, self.config, pl_module.noise_var)
@@ -108,7 +108,7 @@ class LatticeInferenceCallback(Callback):
             data = data.reshape(img_shape).cpu().detach()
 
             # residuals = gt - mean
-            residuals = gt - cg_mean
+            residuals = gt - post_mean
             # residuals_optimal = gt - true_mean
 
             vmin = gt.min()
@@ -128,8 +128,8 @@ class LatticeInferenceCallback(Callback):
                 # true posterior mean
                 # ax[2, t].imshow(true_mean[t], vmin=vmin, vmax=vmax)
                 # ax[2, 0].set_ylabel('true posterior mean', fontsize=30)
-                ax[2, t].imshow(cg_mean[t], vmin=vmin, vmax=vmax)
-                ax[2, 0].set_ylabel('CG posterior mean', fontsize=10)
+                ax[2, t].imshow(post_mean[t], vmin=vmin, vmax=vmax)
+                ax[2, 0].set_ylabel('posterior mean', fontsize=10)
 
                 # VI posterior mean
                 ax[3, t].imshow(vi_mean[t])
@@ -141,8 +141,8 @@ class LatticeInferenceCallback(Callback):
                 # ax[3, 0].set_ylabel('residuals optimal', fontsize=30)
 
                 # VI posterior std
-                std_img = ax[4, t].imshow(cg_std[t], vmin=cg_std.min(), vmax=cg_std.max(), cmap='Reds')
-                ax[4, 0].set_ylabel('CG posterior std', fontsize=10)
+                std_img = ax[4, t].imshow(post_std[t], vmin=post_std.min(), vmax=post_std.max(), cmap='Reds')
+                ax[4, 0].set_ylabel('posterior std', fontsize=10)
 
                 # residuals
                 res_img = ax[5, t].imshow(residuals[t], vmin=-residuals.abs().max(), vmax=residuals.abs().max(),
@@ -311,10 +311,10 @@ class GraphInferenceCallback(Callback):
 
         # vi_mean, vi_std = pl_module.vi_dist.posterior_estimate(pl_module.noise_var)
 
-        cg_mean, cg_std = pl_module.cg_mean, pl_module.cg_std
+        post_mean, post_std = pl_module.post_mean, pl_module.post_std
         # vi_mean, vi_std = pl_module.vi_mean, pl_module.vi_std
-        mean = cg_mean.reshape(pl_module.T, -1)[self.tidx].detach()
-        std = cg_std.reshape(pl_module.T, -1)[self.tidx].detach()
+        mean = post_mean.reshape(pl_module.T, -1)[self.tidx].detach()
+        std = post_std.reshape(pl_module.T, -1)[self.tidx].detach()
         indices = np.arange(self.graph_t.num_nodes)
         pos = self.graph_t.pos.cpu().numpy()
 
@@ -324,7 +324,7 @@ class GraphInferenceCallback(Callback):
         cax = ax_divider.append_axes("right", size="7%", pad="2%")
         plot_nodes(dir, self.graph_t, pos, mean.cpu().numpy(),
                    indices, fig, ax, cax)
-        self.logger.log_image(key=f'cg_mean_tidx={self.tidx}', images=[fig])
+        self.logger.log_image(key=f'post_mean_tidx={self.tidx}', images=[fig])
         plt.close()
 
         # plot vi std
@@ -333,7 +333,7 @@ class GraphInferenceCallback(Callback):
         cax = ax_divider.append_axes("right", size="7%", pad="2%")
         plot_nodes(dir, self.graph_t, pos, std.cpu().numpy(),
                    indices, fig, ax, cax)
-        self.logger.log_image(key=f'cg_std_tidx={self.tidx}', images=[fig])
+        self.logger.log_image(key=f'post_std_tidx={self.tidx}', images=[fig])
         plt.close()
 
         if self.subset is not None:
@@ -348,7 +348,7 @@ class GraphInferenceCallback(Callback):
 
             plot_nodes(dir, self.subgraph, pos, mean[self.subset].cpu().numpy(), indices, fig, ax, cax,
                        mark_indices=self.mark_subset.cpu().numpy())
-            self.logger.log_image(key=f'subset_cg_mean_tidx={self.tidx}', images=[fig])
+            self.logger.log_image(key=f'subset_post_mean_tidx={self.tidx}', images=[fig])
             plt.close()
 
             fig, ax = plt.subplots(figsize=(15, 10))
@@ -357,7 +357,7 @@ class GraphInferenceCallback(Callback):
 
             plot_nodes(dir, self.subgraph, pos, std[self.subset].cpu().numpy(), indices, fig, ax, cax,
                        mark_indices=self.mark_subset.cpu().numpy())
-            self.logger.log_image(key=f'subset_cg_std_tidx={self.tidx}', images=[fig])
+            self.logger.log_image(key=f'subset_post_std_tidx={self.tidx}', images=[fig])
             plt.close()
 
         # # use CG to approximate true posterior
@@ -375,15 +375,16 @@ class GraphInferenceCallback(Callback):
         # self.logger.log_image(key=f'CG_mean_tidx={self.tidx}', images=[fig])
         # plt.close()
 
-        cg_mean = cg_mean.reshape(pl_module.T, -1).cpu()
-        cg_std = cg_std.reshape(pl_module.T, -1).cpu()
+        post_mean = post_mean.reshape(pl_module.T, -1).cpu()
+        post_std = post_std.reshape(pl_module.T, -1).cpu()
         data = pl_module.y_masked.reshape(pl_module.T, -1).cpu()
         data[data == 0] = np.nan
 
         fig, ax = plt.subplots(figsize=(10, 6))
         for idx in self.test_nodes:  # [:3]:
-            l = ax.plot(cg_mean[:, idx], label=f'node {idx}')
-            ax.fill_between(range(pl_module.T), cg_mean[:, idx] - cg_std[:, idx], cg_mean[:, idx] + cg_std[:, idx],
+            l = ax.plot(post_mean[:, idx], label=f'node {idx}')
+            ax.fill_between(range(pl_module.T), post_mean[:, idx] - post_std[:, idx],
+                            post_mean[:, idx] + post_std[:, idx],
                             alpha=0.2, color=l[0].get_color())
             # for jdx in range(vi_samples.size(0)):
             #     ax.plot(vi_samples[jdx, :, idx].cpu(), c=l[0].get_color(), alpha=0.1)
@@ -398,8 +399,8 @@ class GraphInferenceCallback(Callback):
         # vi_mean = vi_mean.reshape(pl_module.T, -1).cpu()
         # true_mean = true_mean.reshape(pl_module.T, -1).cpu()
         fig, ax = plt.subplots(figsize=(10, 6))
-        l = ax.plot(cg_mean.mean(1), label='CG mean')
-        ax.fill_between(range(pl_module.T), cg_mean.mean(1)-cg_mean.std(1), cg_mean.mean(1)+cg_mean.std(1),
+        l = ax.plot(post_mean.mean(1), label='CG mean')
+        ax.fill_between(range(pl_module.T), post_mean.mean(1)-post_mean.std(1), post_mean.mean(1)+post_mean.std(1),
                         alpha=0.2, color=l[0].get_color())
         # l = ax.plot(true_mean.mean(1), label='CG mean')
         # ax.fill_between(range(pl_module.T), true_mean.mean(1) - true_mean.std(1), true_mean.mean(1) + true_mean.std(1),

@@ -98,7 +98,7 @@ def run_dgmrf(config: DictConfig):
     else:
         features = None
 
-    data = dataset_dict["data"]
+    data = dataset_dict["data"].to(torch.float32)
     masks = dataset_dict["masks"] # shape [T, num_nodes]
     joint_mask = masks.reshape(-1)
 
@@ -237,10 +237,10 @@ def run_dgmrf(config: DictConfig):
 
     for param_name, param_value in model.dgmrf.state_dict().items():
         print("{}: {}".format(param_name, param_value))
-    if hasattr(model.dgmrf, 'dgmrf'):
-        print_params(model.dgmrf.dgmrf, config)
-    else:
-        print_params(model.dgmrf, config)
+    # if hasattr(model.dgmrf, 'dgmrf'):
+    #     print_params(model.dgmrf.dgmrf, config)
+    # else:
+    #     print_params(model.dgmrf, config)
     print(f'noise var = {model.noise_var}')
 
 

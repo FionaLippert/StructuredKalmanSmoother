@@ -1,14 +1,15 @@
 program: test_spdgmrf.py
-name: spatiotemporal_sweep_dynamic
+name: spatiotemporal_sweep_dynamic_diag_noise
 command:
   - ${env}
   - ${interpreter}
   - ${program}
-  - n_iterations=100
   - ${args_no_hyphens}
   - learn_noise_std=True
+  - diag_noise_model=True
   - use_dynamics=True
-  - vi_transition_type=diffusion
+  - use_vi_dynamics=False
+  - vi_layers=0
   - independent_time=True
   - final=True
 method: grid
@@ -17,9 +18,7 @@ metric:
   goal: minimize
 parameters:
   seed:
-    values: [0, 1] #, 2, 3, 4]
-  n_layers:
-    values: [1, 2, 3, 4]
+    values: [0, 1, 2, 3, 4]
   transition_type:
     values: ["diffusion",
              "advection+diffusion"]
@@ -28,8 +27,6 @@ parameters:
   n_layers_temporal:
     values: [1, 2, 3, 4]
   use_features:
-    values: [ true, false ]
-  use_vi_dynamics:
     values: [ true, false ]
   dataset:
     values: ["AQ_PM25_T=400_2015_3_log=True_mask=spatial_block_0.62",
