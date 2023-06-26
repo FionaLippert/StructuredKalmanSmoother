@@ -30,6 +30,7 @@ parser.add_argument("--mask_size", type=float, default=0.62, help="mask size in 
 parser.add_argument("--log_transform", default=False, action='store_true', help="apply log transform")
 parser.add_argument("--variable", type=str, default="PM25", help="Target variable")
 parser.add_argument("--obs_ratio", type=float, default=0.9, help="Fraction of points to observe")
+parser.add_argument("--max_dist", type=float, default=160000, help="Max distance between connected nodes in graph")
 
 args = parser.parse_args()
 
@@ -50,13 +51,19 @@ point_data = ptg.data.Data(pos=torch.tensor(pos))
 graph_transforms = ptg.transforms.Compose((
     ptg.transforms.Delaunay(),
     ptg.transforms.FaceToEdge(),
-    ptg.transforms.Distance()
+    ptg.transforms.Distance(norm=False)
 ))
 G = graph_transforms(point_data)
+
+mask = G.edge_attr.squeeze() <= args.max_dist
+G.edge_attr = G.edge_attr[mask, :]
+G.edge_index = G.edge_index[:, mask]
+
 edge_weights = 1. / G.edge_attr.squeeze()
 G.edge_weight = edge_weights / edge_weights.max()
 
 normals = torch.stack([utils.get_normal(pos[u], pos[v]) for u, v in G.edge_index.T], dim=0)
+G.edge_attr = normals
 
 G.weighted_degrees = utils.weighted_degrees(G)
 G.weighted_eigvals = utils.compute_eigenvalues_weighted(G)
@@ -132,6 +139,13 @@ variable = f'{args.variable}_Concentration'
 G_nx = ptg.utils.convert.to_networkx(G)
 # cmap = colormaps.get_cmap('viridis')
 # norm = Normalize(vmin=df_sub[variable].min(), vmax=df_sub[variable].max())
+
+fig, ax = plt.subplots(figsize=(10, 10))
+nx.draw_networkx_nodes(G_nx, pos, node_size=10, ax=ax, alpha=0.7)
+nx.draw_networkx_edges(G_nx, pos, ax=ax, width=0.5, arrowsize=0.1)
+fig.savefig(osp.join(dir, f'sensor_network_{args.max_dist}.png'), dpi=200)
+
+
 
 for tidx, (ts, df_t) in enumerate(df_sub.groupby('timestamp', sort=True)):
     if tidx >= tidx_start and tidx < tidx_end:
@@ -231,6 +245,7 @@ elif args.mask == 'forecasting':
     # mask all nodes for last few time steps
     n_trainval = int(T * args.obs_ratio)
     n_train = int(n_trainval * args.data_split)
+    n_val = n_trainval - n_train
 
     all_train_masks = torch.zeros_like(joint_mask).reshape(T, -1)
     all_train_masks[:n_train] = 1
