@@ -4,20 +4,19 @@ command:
   - ${env}
   - ${interpreter}
   - ${program}
-  - n_iterations=100
   - ${args_no_hyphens}
-  - learn_noise_std=True
-  - use_dynamics=True
+  - learn_noise_std=true
+  - use_dynamics=true
   - vi_transition_type=diffusion
-  - independent_time=True
-  - final=True
+  - independent_time=true
+  - final=true
 method: grid
 metric:
   name: test_rmse
   goal: minimize
 parameters:
   seed:
-    values: [0, 1] #, 2, 3, 4]
+    values: [0, 1, 2, 3, 4]
   n_layers:
     values: [1, 2, 3, 4]
   transition_type:
@@ -32,9 +31,9 @@ parameters:
   use_vi_dynamics:
     values: [ true, false ]
   dataset:
-    values: ["AQ_PM25_T=400_2015_3_log=True_mask=spatial_block_0.62",
-             "AQ_PM25_T=400_2015_3_log=True_mask=all_spatial_0.9",
-             "AQ_PM25_T=400_2015_3_log=True_mask=all_temporal_0.9",
-             "AQ_PM25_T=400_2015_3_log=True_mask=forecasting_0.9"]
+    values: ['"AQ_PM25_T=400_2015_3_log=True_mask=spatial_block_0.62"',
+             '"AQ_PM25_T=400_2015_3_log=True_mask=all_spatial_0.9"',
+             '"AQ_PM25_T=400_2015_3_log=True_mask=all_temporal_0.9"',
+             '"AQ_PM25_T=400_2015_3_log=True_mask=forecasting_0.9"']
 
 

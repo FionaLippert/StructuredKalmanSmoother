@@ -5,12 +5,12 @@ command:
   - ${interpreter}
   - ${program}
   - ${args_no_hyphens}
-  - learn_noise_std=True
-  - use_dynamics=True
+  - learn_noise_std=true
+  - use_dynamics=true
   - vi_transition_type=diffusion
-  - independent_time=True
-  - use_features_dynamics=True
-  - final=True
+  - independent_time=true
+  - use_features_dynamics=true
+  - final=true
 method: grid
 metric:
   name: test_rmse
@@ -32,9 +32,9 @@ parameters:
   use_vi_dynamics:
     values: [ true, false ]
   dataset:
-    values: ["AQ_PM25_T=400_2015_3_log=True_mask=spatial_block_0.62",
-             "AQ_PM25_T=400_2015_3_log=True_mask=all_spatial_0.9",
-             "AQ_PM25_T=400_2015_3_log=True_mask=all_temporal_0.9",
-             "AQ_PM25_T=400_2015_3_log=True_mask=forecasting_0.9"]
+    values: ['"AQ_PM25_T=400_2015_3_log=True_mask=spatial_block_0.62"',
+             '"AQ_PM25_T=400_2015_3_log=True_mask=all_spatial_0.9"',
+             '"AQ_PM25_T=400_2015_3_log=True_mask=all_temporal_0.9"',
+             '"AQ_PM25_T=400_2015_3_log=True_mask=forecasting_0.9"']
 
 

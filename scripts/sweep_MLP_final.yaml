@@ -1,11 +1,11 @@
 program: run_MLP.py
-name: mlp_sweep
+name: mlp_sweep_final
 command:
   - ${env}
   - ${interpreter}
   - ${program}
   - ${args_no_hyphens}
-  - final=False
+  - final=True
   - early_stopping_patience=10
   - MLP_nonlinearity="ReLU"
 method: grid
@@ -16,9 +16,9 @@ parameters:
   seed:
     values: [0, 1, 2, 3, 4]
   lr:
-    values: [0.1, 0.01, 0.005, 0.001]
+    values: [0.1, 0.001]
   MLP_hidden_dim:
-    values: [4, 8, 16, 32]
+    values: [4, 32]
   dataset:
     values: ['"AQ_PM25_T=400_2015_3_log=True_mask=spatial_block_0.62"',
              '"AQ_PM25_T=400_2015_3_log=True_mask=all_spatial_0.9"',

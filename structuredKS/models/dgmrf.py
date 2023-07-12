@@ -1693,9 +1693,9 @@ class SpatiotemporalInference(pl.LightningModule):
     def predict_step(self, predict_mask, *args):
 
         if self.config.get('use_KS', False):
-            self.KS_prediction(predict_mask.squeeze(0))
+            return self.KS_prediction(predict_mask.squeeze(0))
         else:
-            self.DGMRF_prediction(predict_mask.squeeze(0))
+            return self.DGMRF_prediction(predict_mask.squeeze(0))
 
     def DGMRF_prediction(self, predict_mask):
 
