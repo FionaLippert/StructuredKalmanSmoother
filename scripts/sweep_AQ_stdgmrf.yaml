@@ -29,6 +29,6 @@ parameters:
   use_features:
     values: [true, false]
   dataset:
-    values: ['"AQ_PM25_T=400_2015_3_log=True_mask=spatial_block_0.62"']
+    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.62"']
 
 

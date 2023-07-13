@@ -166,28 +166,36 @@ class MLP(pl.LightningModule):
         return loss
 
 
+    def evaluate(self, test_mask, split='test'):
+
+        y_hat = self.mlp(self.features).squeeze()
+        targets = self.targets[test_mask]
+        residuals = targets - y_hat[test_mask]
+
+        self.log(f"{split}_mae", residuals.abs().mean().item(), sync_dist=True)
+        self.log(f"{split}_mse", torch.pow(residuals, 2).mean().item(), sync_dist=True)
+        self.log(f"{split}_rmse", torch.pow(residuals, 2).mean().sqrt().item(), sync_dist=True)
+        self.log(f"{split}_mape", (residuals / targets).abs().mean().item(), sync_dist=True)
+
     def test_step(self, test_mask, *args):
 
-        y_hat = self.mlp(self.features)
-
-        residuals = y_hat.view(1, -1)[test_mask] - self.targets.view(1, -1)[test_mask]
-
-        self.log("test_mae", residuals.abs().mean().item(), sync_dist=True)
-        self.log("test_rmse", torch.pow(residuals, 2).mean().sqrt().item(), sync_dist=True)
-        self.log("test_mse", torch.pow(residuals, 2).mean().item(), sync_dist=True)
-        self.log("test_mape", (residuals / self.targets.view(1, -1)[test_mask]).abs().mean().item(), sync_dist=True)
+        self.evaluate(test_mask.squeeze(), split='test')
 
 
     def validation_step(self, val_mask, *args):
 
-        y_hat = self.mlp(self.features)
+        # y_hat = self.mlp(self.features)
+        # val_mask = val_mask.reshape(-1)
+        #
+        # targets = self.targets[val_mask]
+        # residuals = y_hat[val_mask] - targets
+        #
+        # self.log("val_mae", residuals.abs().mean().item(), sync_dist=True)
+        # self.log("val_rmse", torch.pow(residuals, 2).mean().sqrt().item(), sync_dist=True)
+        # self.log("val_mse", torch.pow(residuals, 2).mean().item(), sync_dist=True)
+        # self.log("val_mape", (residuals / targets).abs().mean().item(), sync_dist=True)
 
-        residuals = y_hat.view(1, -1)[val_mask] - self.targets.view(1, -1)[val_mask]
-
-        self.log("val_mae", residuals.abs().mean().item(), sync_dist=True)
-        self.log("val_rmse", torch.pow(residuals, 2).mean().sqrt().item(), sync_dist=True)
-        self.log("val_mse", torch.pow(residuals, 2).mean().item(), sync_dist=True)
-        self.log("val_mape", (residuals / self.targets.view(1, -1)[val_mask]).abs().mean().item(), sync_dist=True)
+        self.evaluate(val_mask.squeeze(), split='val')
 
 
     def predict_step(self, predict_mask, *args):

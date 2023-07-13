@@ -832,7 +832,8 @@ class GNNTransition(ptg.nn.MessagePassing):
         self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim + n_features, 10),
                                             torch.nn.ReLU(),
                                             torch.nn.Linear(10, 1),
-                                            torch.nn.Tanh())
+                                            # torch.nn.Tanh()
+                                            )
 
         # self.diff_param = torch.nn.Parameter(2 * torch.rand(1,) - 1)
     #
@@ -1059,8 +1060,6 @@ class TemporalDGMRF(torch.nn.Module):
             states = states + self.bias.reshape(1, -1, 1)
 
         for layer in layers:
-            # TODO: use different parameters for each transition layer?
-            # TODO: if so, order needs to be reversed for transpose model
             if hasattr(self, 'transition_models'):
                 # if self.transition_type == 'inhomogeneous_advection+diffusion':
                 #     v = kwargs.get('v').unsqueeze(2).repeat(1, 1, states.size(1), 1)  # shape [2, n_samples, T-1, num_nodes]

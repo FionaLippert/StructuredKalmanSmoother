@@ -27,7 +27,7 @@ parser.add_argument("--data_split", type=list, default=0.9, help="fraction of no
 parser.add_argument("--standardize", default=False, action='store_true', help="Standardize data to mean=0, std=1")
 parser.add_argument("--mask", default='spatial_block', help="Type of mask; spatial_block, all_spatial, all_temporal, forecasting, or random")
 parser.add_argument("--mask_size", type=float, default=0.62, help="mask size in percentage of total area")
-parser.add_argument("--log_transform", default=False, action='store_true', help="apply log transform")
+parser.add_argument("--log_transform", default=True, action='store_true', help="apply log transform")
 parser.add_argument("--variable", type=str, default="PM25", help="Target variable")
 parser.add_argument("--obs_ratio", type=float, default=0.9, help="Fraction of points to observe")
 parser.add_argument("--max_dist", type=float, default=160000, help="Max distance between connected nodes in graph")
@@ -141,7 +141,8 @@ G_nx = ptg.utils.convert.to_networkx(G)
 # norm = Normalize(vmin=df_sub[variable].min(), vmax=df_sub[variable].max())
 
 fig, ax = plt.subplots(figsize=(10, 10))
-nx.draw_networkx_nodes(G_nx, pos, node_size=10, ax=ax, alpha=0.7)
+colors = ['green' if test_mask[i] else 'red' for i in range(len(G_nx))]
+nx.draw_networkx_nodes(G_nx, pos, node_size=20, node_color=colors, ax=ax, alpha=0.7)
 nx.draw_networkx_edges(G_nx, pos, ax=ax, width=0.5, arrowsize=0.1)
 fig.savefig(osp.join(dir, f'sensor_network_{args.max_dist}.png'), dpi=200)
 
@@ -167,6 +168,7 @@ for tidx, (ts, df_t) in enumerate(df_sub.groupby('timestamp', sort=True)):
         #     print(torch.logical_not(torch.isin(nodes, torch.tensor(df_weather.node_idx.values))).nonzero().flatten())
 
         data = torch.tensor(df_t[variable].values)
+        # print(tidx, data.min())
         covariates = torch.tensor(df_weather.sort_values('node_idx')[weather_vars].values) # shape [num_nodes, n_vars]
         # print(covariates.min(), covariates.max())
         all_data.append(data)
@@ -174,32 +176,42 @@ for tidx, (ts, df_t) in enumerate(df_sub.groupby('timestamp', sort=True)):
         timestamps.append(ts)
         all_covariates.append(covariates)
 
-        if args.mask == 'spatial_block':
+        # if args.mask == 'spatial_block':
+        #
+        #     # apply mask for 20% of the time steps
+        #     if ((tidx - tidx_start) > 0.2 * T) and ((tidx - tidx_start) < 0.7 * T):
+        #         # use masked out area for testing
+        #         # all_test_indices.append(torch.logical_and(mask, test_mask)[mask].nonzero().squeeze(-1) + n_masked)
+        #         # use the rest of the observed nodes for training and validation
+        #         all_test_masks.append(torch.logical_and(mask, test_mask))
+        #         # all_trainval_indices.append(torch.logical_and(mask, torch.logical_not(test_mask))[mask].nonzero().squeeze(-1)
+        #         #                             + n_masked)
+        #         all_val_masks.append(torch.logical_and(mask, val_mask))
+        #         all_train_masks.append(torch.logical_and(mask, torch.logical_not(test_mask + val_mask)))
+        #     else:
+        #         # use all observed nodes for training and validation
+        #         # all_trainval_indices.append(torch.arange(mask.sum()) + n_masked)
+        #         all_train_masks.append(mask)
+        #
+        #         all_test_masks.append(torch.zeros_like(mask))
+        #         all_val_masks.append(torch.zeros_like(mask))
+        #
+        #     n_masked += mask.sum()
 
-            # apply mask for 20% of the time steps
-            if ((tidx - tidx_start) > 0.2 * T) and ((tidx - tidx_start) < 0.7 * T):
-                # use masked out area for testing
-                # all_test_indices.append(torch.logical_and(mask, test_mask)[mask].nonzero().squeeze(-1) + n_masked)
-                # use the rest of the observed nodes for training and validation
-                all_test_masks.append(torch.logical_and(mask, test_mask))
-                # all_trainval_indices.append(torch.logical_and(mask, torch.logical_not(test_mask))[mask].nonzero().squeeze(-1)
-                #                             + n_masked)
-                all_val_masks.append(torch.logical_and(mask, val_mask))
-                all_train_masks.append(torch.logical_and(mask, torch.logical_not(test_mask + val_mask)))
-            else:
-                # use all observed nodes for training and validation
-                # all_trainval_indices.append(torch.arange(mask.sum()) + n_masked)
-                all_train_masks.append(mask)
-
-                all_test_masks.append(torch.zeros_like(mask))
-                all_val_masks.append(torch.zeros_like(mask))
-
-            n_masked += mask.sum()
 
 
 all_data = torch.cat(all_data, dim=0)
+
 if args.log_transform:
     all_data = torch.log(all_data + 1e-7)
+
+if args.standardize:
+    data_mean, data_std = all_data.mean(), all_data.std()
+    all_data = (all_data - data_mean) / data_std
+else:
+    data_mean = 0
+    data_std = 1
+
 all_masks = torch.stack(all_masks, dim=0)
 joint_mask = all_masks.reshape(-1)
 all_covariates = torch.cat(all_covariates, dim=0) # shape [T * num_nodes, n_vars]
@@ -210,9 +222,18 @@ all_covariates = all_covariates / all_covariates.max(0).values
 all_covariates = all_covariates * 2 - 1 # scale to range (-1, 1)
 
 if args.mask == 'spatial_block':
-    all_test_masks = torch.stack(all_test_masks, dim=0)
-    all_train_masks = torch.stack(all_train_masks, dim=0)
-    all_val_masks = torch.stack(all_val_masks, dim=0)
+    # all_test_masks = torch.stack(all_test_masks, dim=0)
+    # all_train_masks = torch.stack(all_train_masks, dim=0)
+    # all_val_masks = torch.stack(all_val_masks, dim=0)
+
+    tidx = torch.arange(torch.ceil(0.2 * T), torch.ceil(0.7 * T), dtype=torch.long)
+    all_test_masks = torch.zeros_like(all_masks)
+    all_test_masks[tidx, :] = test_mask.view(1, -1).repeat(tidx.size(0), 1)
+
+    all_val_masks = torch.zeros_like(all_masks)
+    all_val_masks[tidx, :] = val_mask.view(1, -1).repeat(tidx.size(0), 1)
+
+    all_train_masks = torch.logical_not(torch.logical_or(all_test_masks, all_val_masks))
 
     print(f'fraction of masked nodes = {test_mask.sum() / G.num_nodes}')
 
@@ -311,11 +332,12 @@ data = {
     "spatial_graph": G,
     "temporal_graph": G,
     "data": all_data,
-    "masks": all_masks.reshape(T, -1),
-    "test_masks": all_test_masks,
-    "train_masks": all_train_masks,
-    "val_masks": all_val_masks,
+    "masks": all_masks.view(T, -1),
+    "test_masks": torch.logical_and(all_masks.view(T, -1), all_test_masks),
+    "train_masks": torch.logical_and(all_masks.view(T, -1), all_train_masks),
+    "val_masks": torch.logical_and(all_masks.view(T, -1), all_val_masks),
     "covariates": all_covariates,
+    "data_mean_and_std": torch.tensor([data_mean, data_std])
     # "train_idx": train_idx,
     # "val_idx": val_idx,
     # "test_idx": test_idx
@@ -324,8 +346,8 @@ data = {
 obs_ratio = args.mask_size if args.mask == "spatial_block" else args.obs_ratio
 
 # save graph
-ds_name = f'AQ_{args.variable}_T={T}_{args.year}_{args.month}_log={args.log_transform}_mask={args.mask}_' \
-          f'{obs_ratio}'
+ds_name = f'AQ_{args.variable}_T={T}_{args.year}_{args.month}_log={args.log_transform}_norm={args.standardize}_' \
+          f'mask={args.mask}_{obs_ratio}'
 print(f'Saving dataset {ds_name}')
 utils_dgmrf.save_graph_ds(data, args, ds_name)
 
