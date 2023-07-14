@@ -1,7 +1,8 @@
 # main config file
 output_dir: ${oc.env:HOME}/StructuredKalmanSmoother/results
 data_dir: ${oc.env:HOME}/StructuredKalmanSmoother/datasets
-dataset: AQ_PM25_T=50_2015_3_log=True_mask=spatial_block_0.62
+dataset: AQ_PM25_T=400_2015_3_log=True_norm=True_mask=forecasting_0.9
+#dataset: AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.62
 #dataset: spatiotemporal_10x10_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_0
 experiment: test_snellius
 

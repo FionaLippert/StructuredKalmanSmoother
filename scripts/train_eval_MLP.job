@@ -35,7 +35,7 @@ echo $OVERRIDES
 #export WANDB_DIR=$TMPDIR
 
 #srun python test_spdgmrf.py output_dir=$OUTDIR $OVERRIDES
-srun python test_spdgmrf.py $OVERRIDES
+srun python run_MLP.py $OVERRIDES
 
 # sync after completion
 #wandb sync --include-offline $WANDB_DIR/wandb/offline-*

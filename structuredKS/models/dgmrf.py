@@ -758,9 +758,9 @@ class GNNAdvection(ptg.nn.MessagePassing):
         self.edge_dim = self.edge_features.size(1)
         self.n_features = n_features
 
-        self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim + n_features, 10),
+        self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim + n_features, 32),
                                             torch.nn.ReLU(),
-                                            torch.nn.Linear(10, 2),
+                                            torch.nn.Linear(32, 2),
                                             torch.nn.Tanh())
 
         self.diff_param = torch.nn.Parameter(2 * torch.rand(1,) - 1)
