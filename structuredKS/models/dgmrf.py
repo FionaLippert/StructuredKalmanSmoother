@@ -758,9 +758,11 @@ class GNNAdvection(ptg.nn.MessagePassing):
         self.edge_dim = self.edge_features.size(1)
         self.n_features = n_features
 
-        self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim + n_features, 32),
+        hidden_dim = config.get('GNN_hidden_dim', 8)
+
+        self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim + n_features, hidden_dim),
                                             torch.nn.ReLU(),
-                                            torch.nn.Linear(32, 2),
+                                            torch.nn.Linear(hidden_dim, 2),
                                             torch.nn.Tanh())
 
         self.diff_param = torch.nn.Parameter(2 * torch.rand(1,) - 1)
@@ -829,9 +831,11 @@ class GNNTransition(ptg.nn.MessagePassing):
         self.edge_dim = self.edge_features.size(1)
         self.n_features = n_features
 
-        self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim + n_features, 10),
+        hidden_dim = config.get('GNN_hidden_dim', 8)
+
+        self.edge_mlp = torch.nn.Sequential(torch.nn.Linear(self.edge_dim + n_features, hidden_dim),
                                             torch.nn.ReLU(),
-                                            torch.nn.Linear(10, 1),
+                                            torch.nn.Linear(hidden_dim, 1),
                                             # torch.nn.Tanh()
                                             )
 
@@ -987,6 +991,8 @@ class TemporalDGMRF(torch.nn.Module):
         self.num_nodes = get_num_nodes(spatial_graph['edge_index'])
 
         self.features = features
+        self.use_features = config.get('use_features_dynamics', False) and features is not None
+        self.n_features = self.features.size(-1) if self.use_features else 0
 
         self.vi_layer = kwargs.get('vi_layer', False)
         if self.vi_layer:
@@ -1008,11 +1014,7 @@ class TemporalDGMRF(torch.nn.Module):
             self.transition_models = torch.nn.ModuleList([AdvectionModel(config, temporal_graph)
                                                           for _ in range(self.n_transitions)])
         elif self.transition_type == 'GNN_advection':
-            if features is None:
-                n_features = 0
-            else:
-                n_features = features.size(-1)
-            self.transition_models = torch.nn.ModuleList([GNNAdvection(config, temporal_graph, n_features)
+            self.transition_models = torch.nn.ModuleList([GNNAdvection(config, temporal_graph, self.n_features)
                                                           for _ in range(self.n_transitions)])
         elif self.transition_type == 'advection+diffusion':
             self.transition_models = torch.nn.ModuleList([AdvectionDiffusionModel(config, temporal_graph)
@@ -1021,10 +1023,9 @@ class TemporalDGMRF(torch.nn.Module):
             self.transition_models = torch.nn.ModuleList([InhomogeneousAdvectionDiffusionModel(config, temporal_graph)
                                                           for _ in range(self.n_transitions)])
         elif self.transition_type == 'GNN':
-            assert features is not None
-            n_features = features.size(-1)
+            assert self.use_features
             self.transition_models = torch.nn.ModuleList([GNNTransition(config, temporal_graph,
-                                                                        n_features, **kwargs)
+                                                                        self.n_features, **kwargs)
                                                           for _ in range(self.n_transitions)])
         elif self.transition_type == 'flow':
             self.transition_models = torch.nn.ModuleList([FlowModel(config, temporal_graph)
@@ -1035,12 +1036,24 @@ class TemporalDGMRF(torch.nn.Module):
 
         if kwargs.get('use_dynamics_bias', True) and not self.vi_layer:
             print('use dynamics bias')
-            if self.shared_dynamics:
-                self.bias = torch.nn.parameter.Parameter(torch.rand(1,) - 0.5)
+            if self.use_features:
+                hidden_dim = config.get('MLP_hidden_dim', 8)
+                self.bias_net = torch.nn.Sequential(torch.nn.Linear(self.n_features, hidden_dim),
+                                            torch.nn.ReLU(),
+                                            torch.nn.Linear(hidden_dim, 1))
+            # elif self.shared_dynamics:
             else:
-                self.bias = torch.nn.parameter.Parameter(torch.rand(kwargs['T'],) - 0.5)
+                self.bias_param = torch.nn.parameter.Parameter(torch.rand(1,) - 0.5)
+            # else:
+            #     self.bias_param = torch.nn.parameter.Parameter(torch.rand(kwargs['T'],) - 0.5)
         else:
-            self.bias = torch.zeros(1)
+            self.bias_param = torch.zeros(1)
+
+    def bias(self, features=None):
+        if self.use_features:
+            return self.bias_net(features)
+        else:
+            return self.bias_param
 
     def forward(self, x, transpose=False, with_bias=True, p=1, **kwargs):
         # computes e=Fx
@@ -1049,15 +1062,20 @@ class TemporalDGMRF(torch.nn.Module):
 
         if transpose:
             states = x[:, p:]
-            features = self.features[p:] if self.features is not None else None
+            features = self.features[p:] if self.use_features else None
             layers = reversed(self.transition_models)
         else:
             states = x[:, :-p]
-            features = self.features[:-p] if self.features is not None else None
+            features = self.features[:-p] if self.use_features else None
             layers = self.transition_models
 
         if with_bias:
-            states = states + self.bias.reshape(1, -1, 1)
+            if self.use_features:
+                bias = self.bias_net(features).squeeze(-1).unsqueeze(0) # shape [1, T, num_nodes]
+            else:
+                bias = self.bias_param.reshape(1, -1, 1)
+
+            states = states + bias
 
         for layer in layers:
             if hasattr(self, 'transition_models'):
@@ -1405,10 +1423,11 @@ class SpatiotemporalInference(pl.LightningModule):
             self.input_shape = [self.T, self.num_nodes]
             shared_vi = 'all'
 
-        self.vi_dist = VariationalDist(config, spatial_graph, initial_guess.reshape(self.T, -1),
-                                       T=self.T, shared=shared_vi,
-                                       temporal_graph=(temporal_graph if self.use_vi_dynamics else None),
-                                       n_features=(self.features.size(-1) if self.use_features else 0))
+        if not config.get('use_KS', False):
+            self.vi_dist = VariationalDist(config, spatial_graph, initial_guess.reshape(self.T, -1),
+                                           T=self.T, shared=shared_vi,
+                                           temporal_graph=(temporal_graph if self.use_vi_dynamics else None),
+                                           n_features=(self.features.size(-1) if self.use_features else 0))
 
         # self.obs_model = ObservationModel(graphs["latent", "observation", "data"], self.N)
         self.obs_model = lambda x: x[:, self.mask]

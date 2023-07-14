@@ -43,6 +43,8 @@ transition_type: advection+diffusion
 n_layers_temporal: 1
 vi_transition_type: diffusion
 
+GNN_hidden_dim: 16
+
 diag_noise_model: false
 use_KS: false
 
