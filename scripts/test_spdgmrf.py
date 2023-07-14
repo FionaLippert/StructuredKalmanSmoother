@@ -90,7 +90,7 @@ def run_dgmrf(config: DictConfig):
     spatial_graph = dataset_dict["spatial_graph"]
     temporal_graph = dataset_dict["temporal_graph"]
 
-    if config.get('use_features', False):
+    if config.get('use_features', False) or config.get('use_features_dynamics', False):
         features = dataset_dict["covariates"].to(torch.float32)
         features = features - features.mean(0)
         features = features / features.std(0)
