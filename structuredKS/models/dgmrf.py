@@ -1743,11 +1743,17 @@ class SpatiotemporalInference(pl.LightningModule):
         # y_masked[data_mask] = self.y_masked[data_mask]
         y_masked = self.y_masked * data_mask
 
+        def preconditioner(x, transpose=False):
+            # x has shape [nbatch, T, n_nodes]
+            diag = torch.rand(1, 1, x.size(-1))
+            return x * diag
+
+
         self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                         data_mask, self.config, self.noise_var,
                                                         features=self.features, initial_guess=self.vi_mean,
-                                                        preconditioner=None)
-                                                        #preconditioner=self.vi_dist)
+                                                        #preconditioner=None)
+                                                        preconditioner=preconditioner)
 
         self.log('niter_cg', niter, sync_dist=True)
 
@@ -1801,7 +1807,8 @@ class SpatiotemporalInference(pl.LightningModule):
             self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                             data_mask, self.config, self.noise_var,
                                                             features=self.features, initial_guess=self.vi_mean,
-                                                            preconditioner=self.vi_dist)
+                                                            preconditioner=None)
+                                                            #preconditioner=self.vi_dist)
 
         if not hasattr(self, 'cg_samples'):
             self.post_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
