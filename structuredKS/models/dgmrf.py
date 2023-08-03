@@ -1804,12 +1804,13 @@ class SpatiotemporalInference(pl.LightningModule):
 
         if not hasattr(self, 'cg_samples'):
             self.post_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
-                                               data_mask, self.config, self.noise_var, features=self.features)
+                                                 data_mask, self.config, self.noise_var, features=self.features,
+                                                 preconditioner=self.vi_dist)
 
-            if self.use_features:
-                post_samples_x = self.post_samples[:, :self.N]
-                post_samples_beta = self.post_samples[:, self.N:]
-                self.post_samples = post_samples_x + self.features @ post_samples_beta
+            # if self.use_features:
+            #     post_samples_x = self.post_samples[:, :self.N]
+            #     post_samples_beta = self.post_samples[:, self.N:]
+            #     self.post_samples = post_samples_x + self.features @ post_samples_beta
 
 
         return {'post_mean': self.post_mean.reshape(self.T, self.num_nodes),
@@ -1938,11 +1939,14 @@ class SpatiotemporalInference(pl.LightningModule):
 
 # Solve Q_tilde x = rhs using Conjugate Gradient
 def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, features=None,
-             verbose=False, initial_guess=None, return_info=False):
+             verbose=False, initial_guess=None, return_info=False, preconditioner=None):
     # rhs has shape [n_batch, T * n_nodes]
 
     n_batch = rhs.size(0)
     N = mask.numel()
+
+    if preconditioner is not None:
+        rhs = preconditioner(rhs.view(n_batch, T, -1), transpose=True).view(n_batch, -1)
 
     # CG requires more precision for numerical stability
     rhs = rhs.to(torch.float64)
@@ -1951,14 +1955,29 @@ def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, features=None,
     def Q_tilde_batched(x):
         # x has shape (n_batch, T * n_nodes, 1)
 
-        Gx = dgmrf(x.reshape(n_batch, T, -1), with_bias=False)
+        x = x.reshape(n_batch, T, -1)
+
+        if preconditioner is not None:
+            x = preconditioner(x, transpose=False)
+
+        Gx = dgmrf(x, with_bias=False)
         GtGx = dgmrf(Gx, transpose=True, with_bias=False) # has shape [n_batch, T, n_nodes]
 
         # compute Omega^+ @ x (i.e. posterior precision matrix multiplied x)
-        res = GtGx.view(n_batch, N, 1)
+        # res = GtGx.view(n_batch, N, 1)
+        #
+        # if noise_var is not None:
+        #     res = res + (mask.to(torch.float64) / noise_var).view(1, N, 1) * x
 
         if noise_var is not None:
-            res = res + (mask.to(torch.float64) / noise_var).view(1, N, 1) * x
+            res = GtGx + (mask.to(torch.float64) / noise_var).view(1, T, -1) * x
+        else:
+            res = GtGx
+
+        if preconditioner is not None:
+            res = preconditioner(res, transpose=True)
+
+        res = res.view(n_batch, N, 1)
 
         return res
 
@@ -1989,6 +2008,18 @@ def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, features=None,
 
     solution, cg_info = cg_batch.cg_batch(Q_tilde_func, rhs.unsqueeze(-1), X0=initial_guess,
                                           rtol=config["inference_rtol"], maxiter=config["max_cg_iter"], verbose=verbose)
+
+    if config["use_features"] and features is not None:
+        solution_x = solution[:, :N]
+        solution_beta = solution[:, N:]
+
+        if preconditioner is not None:
+            solution_x = preconditioner(solution_x.view(n_batch, T, -1), transpose=False).view(n_batch, -1)
+
+        solution = solution_x + features @ solution_beta
+    else:
+        if preconditioner is not None:
+            solution = preconditioner(solution.view(n_batch, T, -1), transpose=False).view(n_batch, -1)
 
     if verbose:
         print("CG finished in {} iterations, solution optimal: {}".format(
@@ -2042,7 +2073,8 @@ def get_bias(dgmrf, input_shape):
 #     return samples
 
 @torch.no_grad()
-def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, return_info=False, features=None):
+def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, return_info=False, features=None,
+                     preconditioner=None):
     # Construct RHS using Papandeous and Yuille method
     bias = get_bias(dgmrf, data.size())
     T, num_nodes = data.shape[1:]
@@ -2059,6 +2091,9 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, return_inf
     rhs_sample = rhs_sample1 + rhs_sample2
     # Shape (n_samples, n_nodes, 1)
 
+    # if preconditioner is not None:
+    #     rhs_sample = preconditioner(rhs_sample, transpose=True)
+
     if config["use_features"] and features is not None:
         # Change rhs to also sample coefficients
         n_features = features.size(-1)
@@ -2072,10 +2107,11 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, return_inf
         rhs_sample = torch.cat((rhs_sample, rhs_sample_coeff.squeeze(-1)), dim=1)
 
         samples, cg_info = cg_solve(rhs_sample, dgmrf, mask, data.size(1), config,
-                                    noise_var=noise_var, verbose=False, return_info=True, features=features)
+                                    noise_var=noise_var, verbose=False, return_info=True, features=features,
+                                    preconditioner=preconditioner)
     else:
         samples, cg_info = cg_solve(rhs_sample, dgmrf, mask, data.size(1), config,
-                           noise_var=noise_var, verbose=False, return_info=True)
+                           noise_var=noise_var, verbose=False, return_info=True, preconditioner=preconditioner)
     if return_info:
         return samples, cg_info
     else:
@@ -2083,23 +2119,29 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, return_inf
 
 
 @torch.no_grad()
-def sample_prior(n_samples, dgmrf, data_shape, config):
+def sample_prior(n_samples, dgmrf, data_shape, config, preconditioner=None):
 
     bias = get_bias(dgmrf, data_shape)
     std_gauss = torch.randn(n_samples, data_shape[1], data_shape[2])
 
     rhs_sample = dgmrf(std_gauss - bias, transpose=True, with_bias=False) # G^T @ (z - b)
 
+    # if preconditioner is not None:
+    #     rhs_sample = preconditioner(rhs_sample, transpose=True)
+
     # Solve using Conjugate gradient
     samples = cg_solve(rhs_sample.reshape(1, -1), dgmrf, torch.ones(data_shape[1]*data_shape[2]), data_shape[1], config,
-            verbose=False)
+            verbose=False, preconditioner=preconditioner)
+
+    # if preconditioner is not None:
+    #     samples = preconditioner(samples, transpose=False)
 
     return samples
 
 
 
 @torch.no_grad()
-def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess=None):
+def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess=None, preconditioner=None):
     # data has shape [n_batch, T, num_nodes]
     bias = get_bias(dgmrf, data.size())
     print(f'bias = {bias}')
@@ -2109,15 +2151,22 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess=None):
 
     mean_rhs = eta + masked_y / noise_var # eta + H^T @ R^{-1} @ y
 
+    # if preconditioner is not None:
+    #     mean_rhs = preconditioner(mean_rhs, transpose=True)
+
     # mean_rhs = eta
 
     mean_rhs = mean_rhs.reshape(data.size(0), -1)
 
     post_mean = cg_solve(mean_rhs.reshape(data.size(0), -1), dgmrf, mask, data.size(1), config,
                          noise_var=noise_var, verbose=True,
-                         initial_guess=initial_guess.reshape(*mean_rhs.size(), 1))[0]
+                         initial_guess=initial_guess.reshape(*mean_rhs.size(), 1),
+                         preconditioner=preconditioner)
 
-    return post_mean
+    # if preconditioner is not None:
+    #     post_mean = preconditioner(post_mean, transpose=False)
+
+    return post_mean[0]
 
 @torch.no_grad()
 def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None, features=None,
@@ -2131,6 +2180,10 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None
 
     masked_y = mask.to(torch.float32).reshape(1, *data.shape[1:]) * data.to(torch.float32) # H^T @ y (has shape [1, T, num_nodes])
     mean_rhs = eta + masked_y / noise_var # eta + H^T @ R^{-1} @ y
+
+    # if preconditioner is not None:
+    #     mean_rhs = preconditioner(mean_rhs, transpose=True)
+
     mean_rhs = mean_rhs.reshape(data.size(0), -1)
 
     print(f'compute posterior mean')
@@ -2141,18 +2194,33 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None
 
         # run CG iterations
         post_mean, cg_info = cg_solve(mean_rhs, dgmrf, mask, data.size(1), config,
-                                      noise_var=noise_var, verbose=False, return_info=True, features=features, initial_guess=initial_guess.reshape(*mean_rhs.size(), 1))
+                                      noise_var=noise_var, verbose=False, return_info=True, features=features,
+                                      initial_guess=initial_guess.reshape(*mean_rhs.size(), 1),
+                                      preconditioner=preconditioner)
+
+        # post_mean_x = post_mean[:, N]
+        # post_mean_beta = post_mean[0, N:]
+        #
+        # if preconditioner is not None:
+        #     post_mean_x = preconditioner(post_mean_x, transpose=False)
+        #
+        # post_mean_x = post_mean_x[0]
+
+        # print(f'posterior coefficients: {post_mean_beta}')
+        #
+        # post_mean = post_mean_x + features @ post_mean_beta
+
         post_mean = post_mean[0]
-        post_mean_x = post_mean[:N]
-        post_mean_beta = post_mean[N:]
-
-        print(f'posterior coefficients: {post_mean_beta}')
-
-        post_mean = post_mean_x + features @ post_mean_beta
     else:
         # run CG iterations
         post_mean, cg_info = cg_solve(mean_rhs.reshape(data.size(0), -1), dgmrf, mask, data.size(1), config,
-                                      noise_var=noise_var, verbose=False, return_info=True, initial_guess=initial_guess.reshape(*mean_rhs.size(), 1))
+                                      noise_var=noise_var, verbose=False, return_info=True,
+                                      initial_guess=initial_guess.reshape(*mean_rhs.size(), 1),
+                                      preconditioner=preconditioner)
+
+        # if preconditioner is not None:
+        #     post_mean = preconditioner(post_mean, transpose=False)
+
         post_mean = post_mean[0]
 
     end = timer()
@@ -2168,20 +2236,21 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None
     cur_post_samples = 0
     while cur_post_samples < config["n_post_samples"]:
         samples, cg_info = sample_posterior(config["n_training_samples"], dgmrf, data, mask, config,
-                                            noise_var, return_info=True, features=features)
+                                            noise_var, return_info=True, features=features,
+                                            preconditioner=preconditioner)
         posterior_samples_list.append(samples)
         cur_post_samples += config["n_training_samples"]
         niter_list.append(cg_info["niter"])
 
     posterior_samples = torch.cat(posterior_samples_list, dim=0)[:config["n_post_samples"]]
 
-    if config["use_features"] and features is not None:
-        post_samples_x = posterior_samples[:, :N]
-        post_samples_beta = posterior_samples[:, N:]
-        posterior_samples = post_samples_x + features @ post_samples_beta
-
-        post_var_beta = torch.mean(torch.pow(post_samples_beta - post_mean_beta, 2), dim=0)
-        print(f'posterior coeff var: {post_var_beta}')
+    # if config["use_features"] and features is not None:
+    #     post_samples_x = posterior_samples[:, :N]
+    #     post_samples_beta = posterior_samples[:, N:]
+    #     posterior_samples = post_samples_x + features @ post_samples_beta
+    #
+    #     post_var_beta = torch.mean(torch.pow(post_samples_beta - post_mean_beta, 2), dim=0)
+    #     print(f'posterior coeff var: {post_var_beta}')
 
     # MC estimate of variance using known population mean
     post_var_x = torch.mean(torch.pow(posterior_samples - post_mean, 2), dim=0)
