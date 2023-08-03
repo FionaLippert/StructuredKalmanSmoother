@@ -1746,13 +1746,32 @@ class SpatiotemporalInference(pl.LightningModule):
         def preconditioner(x, transpose=False):
             # x has shape [nbatch, T, n_nodes]
             diag = torch.ones(1, 1, x.size(-1))
+
             return x * diag
+
+        def preconditioner2(x, transpose=False):
+            input = torch.eye(self.num_nodes).unsqueeze(1).repeat(1, self.T, 1) # shape [n_nodes, T, n_nodes]
+
+            Gx = self.dgmrf(input, with_bias=False)
+            GtGx = self.dgmrf(Gx, transpose=True, with_bias=False)  # has shape [n_nodes, T, n_nodes]
+
+            if self.noise_var is not None:
+                out = GtGx + (data_mask.to(torch.float64) / self.noise_var).view(1, self.T, -1) * x
+            else:
+                out = GtGx
+
+            diag = torch.diagonal(out, dim1=0, dim2=2)
+
+            print(f'diag shape = {diag.size()}')
+
+            return x * diag.view(1, self.T, self.num_nodes)
+
 
 
         self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                         data_mask, self.config, self.noise_var,
                                                         features=self.features, initial_guess=self.vi_mean,
-                                                        preconditioner=preconditioner)
+                                                        preconditioner=preconditioner2)
 
         self.log('niter_cg', niter, sync_dist=True)
 
