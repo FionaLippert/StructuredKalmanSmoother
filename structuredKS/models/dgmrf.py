@@ -1261,11 +1261,12 @@ class VariationalDist(torch.nn.Module):
 
     def sample(self):
         # standard_sample = torch.randn(self.n_samples, self.dim)
-        standard_sample = torch.randn(self.n_samples, self.T, self.dim)
-        samples = self.std * standard_sample # [T, dim] * [samples, T, dim]
+        samples = torch.randn(self.n_samples, self.T, self.dim)
 
         if hasattr(self, 'dynamics'):
             samples = samples - self.dynamics(samples, with_bias=False)
+
+        samples = self.std * samples # [T, dim] * [samples, T, dim]
 
         for layer in self.layers:
             propagated = layer(samples, transpose=False, with_bias=False)
@@ -1276,6 +1277,61 @@ class VariationalDist(torch.nn.Module):
             samples = self.post_diag.unsqueeze(0) * samples # [1, T, dim] * [samples, T, dim]
         samples = samples + self.mean_param.unsqueeze(0) # [samples, T, dim] + [1, T, dim]
         return samples # shape (n_samples, T, dim)
+
+    def forward(self, x, transpose=False):
+
+        if transpose:
+            return self.P_transpose(x)
+        else:
+            return self.P(x)
+
+    def P(self, x):
+        # apply factor P to vector x
+        # x has shape [nbatch, T, dim]
+
+        if hasattr(self, 'dynamics'):
+            # multiply with \Tilde{F}
+            out = x - self.dynamics(x, with_bias=False)
+        else:
+            out = x
+
+        # multiply with diagonal matrix
+        out = self.std * out  # [T, dim] * [nbatch, T, dim]
+
+        # multiply with \Tilde{S}
+        for layer in self.layers:
+            out = layer(out, transpose=False, with_bias=False)
+
+        if self.layers:
+            # multiply with post diagonal matrix
+            out = self.post_diag.unsqueeze(0) * out # [1, T, dim] * [nbatch, T, dim]
+
+        return out # shape (nbatch, T, dim)
+
+
+    def P_transpose(self, x):
+        # apply factor P^T to vector x
+        # x has shape [nbatch, T, dim]
+
+        if self.layers:
+            # multiply with post diagonal matrix
+            out = self.post_diag.unsqueeze(0) * x # [1, T, dim] * [nbatch, T, dim]
+        else:
+            out = x
+
+        # multiply with \Tilde{S}
+        for layer in self.layers:
+            out = layer(out, transpose=True, with_bias=False)
+
+        # multiply with diagonal matrix
+        out = self.std * out # [T, dim] * [nbatch, T, dim]
+
+        if hasattr(self, 'dynamics'):
+            # multiply with \Tilde{F}
+            out = out - self.dynamics(out, transpose=True, with_bias=False)
+
+        return out # shape (nbatch, T, dim)
+
 
     def log_det(self):
         layers_log_det = sum([layer.log_det() for layer in self.layers])
@@ -1689,7 +1745,8 @@ class SpatiotemporalInference(pl.LightningModule):
 
         self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                         data_mask, self.config, self.noise_var,
-                                                        features=self.features, initial_guess=self.vi_mean)
+                                                        features=self.features, initial_guess=self.vi_mean,
+                                                        preconditioner=self.vi_dist)
 
         self.log('niter_cg', niter, sync_dist=True)
 
@@ -1742,7 +1799,8 @@ class SpatiotemporalInference(pl.LightningModule):
         if not (hasattr(self, 'cg_mean') or hasattr(self, 'cg_std')):
             self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                             data_mask, self.config, self.noise_var,
-                                                            features=self.features, initial_guess=self.vi_mean)
+                                                            features=self.features, initial_guess=self.vi_mean,
+                                                            preconditioner=self.vi_dist)
 
         if not hasattr(self, 'cg_samples'):
             self.post_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
@@ -2056,14 +2114,14 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess=None):
     mean_rhs = mean_rhs.reshape(data.size(0), -1)
 
     post_mean = cg_solve(mean_rhs.reshape(data.size(0), -1), dgmrf, mask, data.size(1), config,
-                         noise_var=noise_var, verbose=True)[0] #,
+                         noise_var=noise_var, verbose=True,
                          initial_guess=initial_guess.reshape(*mean_rhs.size(), 1))[0]
 
     return post_mean
 
 @torch.no_grad()
 def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None, features=None,
-                        verbose=False, return_time=False):
+                        verbose=False, return_time=False, preconditioner=None):
     # data has shape [n_batch, T, num_nodes]
     niter_list = []
     N = mask.numel()
