@@ -201,6 +201,11 @@ def run_dgmrf(config: DictConfig):
     earlystopping_callback = EarlyStopping(monitor="val_rec_loss", mode="min", patience=config["early_stopping_patience"])
 
 
+    if config.get('use_KS', False):
+        callbacks = []
+    else:
+        callbacks = [inference_callback, earlystopping_callback]
+
     trainer = pl.Trainer(
         max_epochs=int(config["n_iterations"] / config["val_interval"]),
         log_every_n_steps=1,
@@ -208,7 +213,7 @@ def run_dgmrf(config: DictConfig):
         deterministic=True,
         accelerator='gpu',
         devices=1,
-        callbacks=[inference_callback, earlystopping_callback],
+        callbacks=callbacks,
     )
 
 

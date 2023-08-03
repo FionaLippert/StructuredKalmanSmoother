@@ -1,0 +1,36 @@
+#!/bin/bash
+
+#SBATCH --partition=thin
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --job-name=sweep
+#SBATCH --time=12:00:00
+#SBATCH --output=slurm_output_%A_%a.out
+#SBATCH --mail-type=BEGIN,END
+#SBATCH --mail-user=f.lippert@uva.nl
+
+# run this file as "sbatch sweep.job sweep_id
+
+source activate stdgmrf
+
+cd $HOME/StructuredKalmanSmoother/scripts
+
+which python
+
+#OUTDIR=$TMPDIR/results
+#mkdir -p $OUTDIR
+
+nvidia-smi
+
+# don't sync while running on compute nodes
+#export WANDB_MODE="offline"
+export WANDB_DIR=$HOME/StructuredKalmanSmoother
+
+wandb agent $1
+
+# sync after completion
+#wandb sync --include-offline $WANDB_DIR/wandb/offline-*
+
+#mkdir -p $HOME/StructuredKalmanSmoother/slurm_outputs
+#cp -r $OUTDIR $HOME/StructuredKalmanSmoother/slurm_outputs

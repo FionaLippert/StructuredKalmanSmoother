@@ -1,5 +1,5 @@
 program: test_spdgmrf.py
-name: spatiotemporal_sweep
+name: dgmrf_sweep
 command:
   - ${env}
   - ${interpreter}

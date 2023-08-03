@@ -22,7 +22,6 @@ parameters:
   dataset:
     values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.62"',
              '"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=all_spatial_0.9"',
-             '"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=all_temporal_0.9"',
              '"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=forecasting_0.9"']
 
 

@@ -395,7 +395,8 @@ class DGMRF(torch.nn.Module):
         return sum([layer.log_det() for layer in self.layers])
 
     def get_matrices(self):
-        input = torch.eye(self.num_nodes).reshape(self.num_nodes, 1, self.num_nodes).repeat(1, 2, 1)
+        input = torch.eye(self.num_nodes).reshape(self.num_nodes, 1, self.num_nodes).repeat(1, self.T, 1)
+        print('get_matrices', input.size())
         all_Q = self.forward(input, transpose=True, with_bias=False)
 
         Q_0 = all_Q[:, 0].squeeze()
@@ -724,7 +725,7 @@ class ARModel(torch.nn.Module):
         super(ARModel, self).__init__()
 
         self.weight = torch.nn.Parameter(torch.ones(1,))
-
+        
     def forward(self, x, **kwargs):
 
         return self.weight * x
@@ -738,11 +739,12 @@ class ARModelMultiChannel(torch.nn.Module):
     def __init__(self, T=1):
         super(ARModelMultiChannel, self).__init__()
 
-        self.weight = torch.nn.Parameter(torch.ones(1, T, 1))
+        self.weight = torch.nn.Parameter(torch.rand(1, T, 1))
 
     def forward(self, x, **kwargs):
+        
         return self.weight * x
-
+        
 
 
 class GNNAdvection(ptg.nn.MessagePassing):
@@ -846,11 +848,15 @@ class GNNTransition(ptg.nn.MessagePassing):
     #     return torch.pow(self.diff_param, 2)
 
     def forward(self, x, transpose=False, features=None):
-        assert features.size(-1) == self.n_features
+        #assert features.size(-1) == self.n_features
         # x has shape [num_samples, T, num_nodes]
         # features has shape [T, num_nodes, num_features]
         edge_index = self.edge_index_transpose if transpose else self.edge_index
-        agg = self.propagate(edge_index, x=x, node_attr=features.transpose(1, 2),
+        
+        if features is None:
+            agg = self.propagate(edge_index, x=x, edge_attr=self.edge_features, transpose=transpose)
+        else:
+            agg = self.propagate(edge_index, x=x, node_attr=features.transpose(1, 2),
                              edge_attr=self.edge_features, transpose=transpose)
 
         new_x = x + agg # TODO: also use self-weight? i.e. F_ii != 1
@@ -858,12 +864,16 @@ class GNNTransition(ptg.nn.MessagePassing):
         return new_x
 
 
-    def message(self, x_j, node_attr_i, node_attr_j, edge_attr, transpose):
+    def message(self, x_j, edge_attr, node_attr_i=None, node_attr_j=None, transpose=False):
         # edge_attr has shape [num_edges, num_features]
         # covariates has shape [T, num_features, num_edges]
 
-        edge_attr = edge_attr.unsqueeze(0).repeat(node_attr_i.size(0), 1, 1)
-        inputs = torch.cat([edge_attr, (node_attr_j + node_attr_i).transpose(1, 2)], dim=-1)
+        #TODO: check if this works now
+        if node_attr_i is None or node_attr_j is None:
+            inputs = edge_attr.unsqueeze(0)
+        else:
+            edge_attr = edge_attr.unsqueeze(0).repeat(node_attr_i.size(0), 1, 1)
+            inputs = torch.cat([edge_attr, (node_attr_j + node_attr_i).transpose(1, 2)], dim=-1)
 
         coeffs = self.edge_mlp(inputs).squeeze(-1)
 
@@ -1023,7 +1033,7 @@ class TemporalDGMRF(torch.nn.Module):
             self.transition_models = torch.nn.ModuleList([InhomogeneousAdvectionDiffusionModel(config, temporal_graph)
                                                           for _ in range(self.n_transitions)])
         elif self.transition_type == 'GNN':
-            assert self.use_features
+            #assert self.use_features_dynamics
             self.transition_models = torch.nn.ModuleList([GNNTransition(config, temporal_graph,
                                                                         self.n_features, **kwargs)
                                                           for _ in range(self.n_transitions)])
@@ -1101,8 +1111,8 @@ class TemporalDGMRF(torch.nn.Module):
 
     def get_matrix(self, dtype=torch.float32):
         # F_t = self.forward(torch.eye(num_nodes).reshape(1, 1, num_nodes, num_nodes), transpose=True, with_bias=False)
-        F_t = self.forward(torch.eye(self.num_nodes).reshape(self.num_nodes, 1, self.num_nodes),
-                           transpose=True, with_bias=False, p=0).squeeze()
+        F_t = self.forward(torch.eye(self.num_nodes).reshape(self.num_nodes, 1, self.num_nodes).repeat(1, 2, 1),
+                transpose=True, with_bias=False, p=1)[:, 0, :].squeeze()
 
         return F_t.to(dtype)
 
@@ -1583,8 +1593,10 @@ class SpatiotemporalInference(pl.LightningModule):
 
         if self.config.get('use_KS', False):
             Q_0, Q_t = self.dgmrf.get_matrices() # all have shape [num_nodes, num_nodes]
+            #TODO: allow for time-varying F_t (depending on covariates)?
             F_t = self.dgmrf.get_transition_matrix()
             # assume mu_0 and c_t are all zero
+            #TODO: get mu_0 and c_t from STDGMRF
             mu_0 = torch.zeros(self.num_nodes)
             # R_t = self.noise_var * torch.eye(self.num_nodes)
 
@@ -1640,25 +1652,22 @@ class SpatiotemporalInference(pl.LightningModule):
 
     def validation_step(self, val_mask, *args):
 
-        samples = self.vi_dist.sample() # shape [n_samples, T, num_nodes]
-        samples = samples.reshape(self.n_training_samples, -1) # shape [n_samples, T * num_nodes]
+        if self.config.get('use_KS', False):
+            pass
+        else:
+            samples = self.vi_dist.sample() # shape [n_samples, T, num_nodes]
+            samples = samples.reshape(self.n_training_samples, -1) # shape [n_samples, T * num_nodes]
 
-        if self.use_features:
-            coeffs = self.vi_dist.sample_coeff(self.n_training_samples).unsqueeze(1) # [n_samples, 1, n_features]
-            samples = samples + coeffs @ self.features.transpose(0, 1)
+            if self.use_features:
+                coeffs = self.vi_dist.sample_coeff(self.n_training_samples).unsqueeze(1) # [n_samples, 1, n_features]
+                samples = samples + coeffs @ self.features.transpose(0, 1)
 
-        rec_loss = self._reconstruction_loss(samples, val_mask.squeeze(0)) / (val_mask.sum() * self.n_training_samples)
+            rec_loss = self._reconstruction_loss(samples, val_mask.squeeze(0)) / (val_mask.sum() * self.n_training_samples)
 
-        self.log("val_rec_loss", rec_loss.item(), sync_dist=True)
-
-        # vi_mean, vi_std = self.vi_dist.posterior_estimate()
-        # val_dict = {'vi_mean': vi_mean,
-        #             'vi_std': vi_std,
-        #             'val_index': val_index}
-
-        # return val_dict
+            self.log("val_rec_loss", rec_loss.item(), sync_dist=True)
 
     def test_step(self, test_mask, *args):
+    
         if self.config.get('use_KS', False):
             self.KS_inference(test_mask.squeeze(0), split='test')
         else:
@@ -1680,7 +1689,7 @@ class SpatiotemporalInference(pl.LightningModule):
 
         self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                         data_mask, self.config, self.noise_var,
-                                                        features=self.features)
+                                                        features=self.features, initial_guess=self.vi_mean)
 
         self.log('niter_cg', niter, sync_dist=True)
 
@@ -1717,6 +1726,11 @@ class SpatiotemporalInference(pl.LightningModule):
 
     def DGMRF_prediction(self, predict_mask):
 
+        F_t = self.dgmrf.get_transition_matrix()
+        print(f'transition matrix = {F_t}')
+        svdvals = torch.linalg.svdvals(F_t)
+        print(f'svd vals min = {svdvals.min()}, max = {svdvals.max()}')
+        
         data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask))
 
         y_masked = torch.zeros_like(self.y_masked)
@@ -1728,7 +1742,7 @@ class SpatiotemporalInference(pl.LightningModule):
         if not (hasattr(self, 'cg_mean') or hasattr(self, 'cg_std')):
             self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                             data_mask, self.config, self.noise_var,
-                                                            features=self.features)
+                                                            features=self.features, initial_guess=self.vi_mean)
 
         if not hasattr(self, 'cg_samples'):
             self.post_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
@@ -2043,7 +2057,7 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess=None):
 
     post_mean = cg_solve(mean_rhs.reshape(data.size(0), -1), dgmrf, mask, data.size(1), config,
                          noise_var=noise_var, verbose=True)[0] #,
-                         # initial_guess=initial_guess.reshape(*mean_rhs.size(), 1))[0]
+                         initial_guess=initial_guess.reshape(*mean_rhs.size(), 1))[0]
 
     return post_mean
 
@@ -2069,7 +2083,7 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None
 
         # run CG iterations
         post_mean, cg_info = cg_solve(mean_rhs, dgmrf, mask, data.size(1), config,
-                                      noise_var=noise_var, verbose=False, return_info=True, features=features)
+                                      noise_var=noise_var, verbose=False, return_info=True, features=features, initial_guess=initial_guess.reshape(*mean_rhs.size(), 1))
         post_mean = post_mean[0]
         post_mean_x = post_mean[:N]
         post_mean_beta = post_mean[N:]
@@ -2080,7 +2094,7 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess=None
     else:
         # run CG iterations
         post_mean, cg_info = cg_solve(mean_rhs.reshape(data.size(0), -1), dgmrf, mask, data.size(1), config,
-                                      noise_var=noise_var, verbose=False, return_info=True)
+                                      noise_var=noise_var, verbose=False, return_info=True, initial_guess=initial_guess.reshape(*mean_rhs.size(), 1))
         post_mean = post_mean[0]
 
     end = timer()
