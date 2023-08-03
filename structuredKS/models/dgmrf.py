@@ -1746,7 +1746,8 @@ class SpatiotemporalInference(pl.LightningModule):
         self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                         data_mask, self.config, self.noise_var,
                                                         features=self.features, initial_guess=self.vi_mean,
-                                                        preconditioner=self.vi_dist)
+                                                        preconditioner=None)
+                                                        #preconditioner=self.vi_dist)
 
         self.log('niter_cg', niter, sync_dist=True)
 
@@ -1805,7 +1806,8 @@ class SpatiotemporalInference(pl.LightningModule):
         if not hasattr(self, 'cg_samples'):
             self.post_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                  data_mask, self.config, self.noise_var, features=self.features,
-                                                 preconditioner=self.vi_dist)
+                                                 preconditioner=None)
+                                                 #preconditioner=self.vi_dist)
 
             # if self.use_features:
             #     post_samples_x = self.post_samples[:, :self.N]
