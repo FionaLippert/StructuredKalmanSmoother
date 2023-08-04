@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import os
 import os.path as osp
 import torch
 import torch_geometric as ptg
@@ -15,7 +16,7 @@ import utils_dgmrf
 dir = '../datasets/AirQuality'
 # weather_vars = ['temperature', 'pressure', 'humidity', 'wind_speed', 'wind_direction']
 # weather_vars = ['t2m', 'sp', 'tp', 'u10', 'v10']
-weather_vars = ['t2m', 'rh', 'sp', 'u10', 'v10', 'solarpos', 'solarpos_dt', 'dayofyear']
+weather_vars = ['t2m', 'rh', 'sp', 'u10', 'v10', 'solarpos', 'solarpos_dt'] #, 'dayofyear']
 
 parser = argparse.ArgumentParser(description='Generate AirQuality dataset')
 
@@ -134,6 +135,7 @@ all_train_masks = []
 n_masked = 0
 
 variable = f'{args.variable}_Concentration'
+df_sub[variable] = df_sub[variable].replace(0, np.nan)
 
 # fig, ax = plt.subplots(1, (tidx_end-tidx_start).item()+1, figsize=(2*(tidx_end-tidx_start).item()+1, 2))
 G_nx = ptg.utils.convert.to_networkx(G)
@@ -220,6 +222,51 @@ all_covariates = torch.cat(all_covariates, dim=0) # shape [T * num_nodes, n_vars
 all_covariates = all_covariates - all_covariates.min(0).values
 all_covariates = all_covariates / all_covariates.max(0).values
 all_covariates = all_covariates * 2 - 1 # scale to range (-1, 1)
+
+print(all_covariates.min(0), all_covariates.max(0))
+
+
+def remove_outliers(x, delta=2.0):
+    # x has shape [num_nodes, T]
+    x = torch.nn.functional.pad(x, (1, 1), 'constant', 0)
+    x_forward = x[:, 2:]
+    x_backward = x[:, :-2]
+    x_center = x[:, 1:-1]
+
+    outliers_forward = (x_forward - x_center).abs() > delta
+    outliers_backward = (x_backward - x_center).abs() > delta
+
+    outliers = torch.logical_and(outliers_backward, outliers_forward)
+    outliers_nan = torch.logical_or(torch.logical_and(outliers_forward, x_backward.isnan()),
+                                    torch.logical_and(outliers_backward, x_forward.isnan()))
+    both_nans = torch.logical_and(x_backward.isnan(), x_forward.isnan())
+
+    outliers = torch.logical_or(outliers, outliers_nan)
+    mask = torch.logical_or(outliers, both_nans)
+
+    x_center[mask] = np.nan
+
+    return x_center
+
+def remove_constants(x):
+    # x has shape [num_nodes, T]
+    x = torch.cat([torch.zeros(x.size(0), 1), x], dim=1)
+    constants = (x[:, 1:] - x[:, :-1]) == 0
+    x = x[:, 1:]
+    x[constants] = np.nan
+
+    return x
+
+states = torch.ones(joint_mask.size(), dtype=all_data.dtype) * np.nan
+states[joint_mask] = all_data
+
+# clean data
+states = remove_outliers(remove_constants(states.reshape(T, -1).transpose(0, 1))).transpose(0, 1).reshape(-1)
+
+# update missing data mask
+joint_mask = torch.logical_not(states.isnan())
+all_data = states[joint_mask]
+
 
 if args.mask == 'spatial_block':
     # all_test_masks = torch.stack(all_test_masks, dim=0)
@@ -332,10 +379,10 @@ data = {
     "spatial_graph": G,
     "temporal_graph": G,
     "data": all_data,
-    "masks": all_masks.view(T, -1),
-    "test_masks": torch.logical_and(all_masks.view(T, -1), all_test_masks),
-    "train_masks": torch.logical_and(all_masks.view(T, -1), all_train_masks),
-    "val_masks": torch.logical_and(all_masks.view(T, -1), all_val_masks),
+    "masks": joint_mask.view(T, -1),
+    "test_masks": torch.logical_and(joint_mask.view(T, -1), all_test_masks),
+    "train_masks": torch.logical_and(joint_mask.view(T, -1), all_train_masks),
+    "val_masks": torch.logical_and(joint_mask.view(T, -1), all_val_masks),
     "covariates": all_covariates,
     "data_mean_and_std": torch.tensor([data_mean, data_std])
     # "train_idx": train_idx,
@@ -345,9 +392,10 @@ data = {
 
 obs_ratio = args.mask_size if args.mask == "spatial_block" else args.obs_ratio
 
+
+
 # save graph
 ds_name = f'AQ_{args.variable}_T={T}_{args.year}_{args.month}_log={args.log_transform}_norm={args.standardize}_' \
           f'mask={args.mask}_{obs_ratio}'
 print(f'Saving dataset {ds_name}')
 utils_dgmrf.save_graph_ds(data, args, ds_name)
-

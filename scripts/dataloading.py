@@ -16,14 +16,14 @@ import constants_dgmrf as constants
 parser = argparse.ArgumentParser(description='Generate dataset')
 
 parser.add_argument("--seed", type=int, default=0, help="Random seed")
-parser.add_argument("--grid_size", type=int, default=20,
+parser.add_argument("--grid_size", type=int, default=30,
         help="Number of grid cells in x and y dimension")
 parser.add_argument("--obs_noise_std", type=float, default=0.01,
         help="Std.-dev. of noise for p(y|x)")
 parser.add_argument("--obs_ratio", type=float, default=0.7,
         help="Fraction of points to observe")
 parser.add_argument("--n_samples", type=int, default=1, help="Number of samples")
-parser.add_argument("--time_steps", type=int, default=6, help="Number of time steps")
+parser.add_argument("--time_steps", type=int, default=20, help="Number of time steps")
 parser.add_argument("--diff", type=float, default=0.01,
         help="Diffusion coefficient")
 parser.add_argument("--advection", type=str, default='constant',
@@ -152,7 +152,7 @@ data['test_masks'] = test_mask.reshape(T, -1)
 data['grid_size'] = torch.tensor([args.grid_size, args.grid_size])
 
 # save graph
-ds_name = f'spatiotemporal_{args.grid_size}x{args.grid_size}_obs={args.obs_ratio}_' \
+ds_name = f'advection_{args.grid_size}x{args.grid_size}_obs={args.obs_ratio}_' \
           f'T={T}_diff={args.diff}_adv={args.advection}_ntrans={args.n_transitions}_1block={args.block_mask}_{args.seed}'
 print(f'Saving dataset {ds_name}')
 utils.save_graph_ds(data, args, ds_name)

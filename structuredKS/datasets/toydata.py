@@ -239,7 +239,6 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
         joint_F = construct_joint_F(F.to_sparse(), T)
         joint_Q = construct_joint_G(P_0.to_sparse(), P_t.to_sparse(), T)
         joint_G = (joint_Q @ (sparse_identity(N * T) - joint_F))
-        print(joint_G.to_dense().min())
     else:
         joint_G = P_0.to_sparse()
 
@@ -313,41 +312,6 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
 
     H = utils.sparse_block_diag(*H)
     mask = get_mask(H.to_dense())
-    R_inv = sparse_identity(H.size(0)) / (obs_noise_std**2)
-
-    # compute true posterior
-    joint_precision = joint_G.transpose(0, 1) @ joint_G
-    posterior_prec, posterior_eta = utils.compute_posterior(joint_precision.to_dense(), mean, y, H, R_inv)
-    posterior_mean = torch.inverse(posterior_prec) @ posterior_eta
-    posterior_std = torch.diag(torch.inverse(posterior_prec))
-
-    joint_edges = joint_G.coalesce().indices()
-    joint_weights = joint_G.coalesce().values()
-    joint_obs_edges = H.coalesce().indices()
-    joint_graph = utils.assemble_joint_graph(states, grid_size, T, y, joint_edges, joint_obs_edges,
-                                             obs_noise_std, joint_edge_attr=joint_weights)
-    joint_graph['latent'].prior_mean = mean.unsqueeze(1)
-    joint_graph['latent'].true_posterior_mean = posterior_mean
-
-    spatial_graphs = ptg.data.Batch.from_data_list(spatial_graphs)
-    spatiotemporal_graphs = ptg.data.Batch.from_data_list(spatiotemporal_graphs)
-    spatiotemporal_graphs['latent'].true_posterior_mean = posterior_mean
-    spatiotemporal_graphs['latent'].true_posterior_std = posterior_std
-    if not advection == 'zero':
-        spatiotemporal_graphs['latent'].velocities = velocities.T
-
-    # print(spatiotemporal_graphs)
-
-    # joint graph that is compatible with original dgmrf code
-    graph_y = ptg.data.Data(edge_index=spatial_graphs["latent", "spatial", "latent"].edge_index, x=data.unsqueeze(1),
-                            mask=mask, pos=node_pos.repeat(T, 1), T=T, grid_size=grid_size)
-    graph_y.eigvals = utils.compute_eigenvalues(graph_y)
-
-    graph_post_mean = graph_y.clone()
-    graph_post_mean.x = posterior_mean
-
-    graph_post_std = graph_y.clone()
-    graph_post_std.x = posterior_std
 
     spatial_graph = ptg.data.Data(edge_index=edges, pos=node_pos)
     temporal_graph = spatial_graph.clone()
@@ -356,12 +320,44 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
     temporal_graph.edge_attr = normals
 
 
-    # test CG method
-    # mean_hat = cg_solve(posterior_eta, posterior_prec, rtol=1e-7)
-    # eigvals = spl.eigvals(posterior_prec).real
-    # print(f'condition number = {eigvals.max() / eigvals.min()}')
+    if N * T < 20000:
+        # compute true posterior
+        R_inv = sparse_identity(H.size(0)) / (obs_noise_std ** 2)
 
-    data_dict = {
+        joint_precision = joint_G.transpose(0, 1) @ joint_G
+        posterior_prec, posterior_eta = utils.compute_posterior(joint_precision.to_dense(), mean, y, H, R_inv)
+        posterior_mean = torch.inverse(posterior_prec) @ posterior_eta
+        posterior_std = torch.diag(torch.inverse(posterior_prec))
+
+        joint_edges = joint_G.coalesce().indices()
+        joint_weights = joint_G.coalesce().values()
+        joint_obs_edges = H.coalesce().indices()
+        joint_graph = utils.assemble_joint_graph(states, grid_size, T, y, joint_edges, joint_obs_edges,
+                                                 obs_noise_std, joint_edge_attr=joint_weights)
+        joint_graph['latent'].prior_mean = mean.unsqueeze(1)
+        joint_graph['latent'].true_posterior_mean = posterior_mean
+
+        spatial_graphs = ptg.data.Batch.from_data_list(spatial_graphs)
+        spatiotemporal_graphs = ptg.data.Batch.from_data_list(spatiotemporal_graphs)
+        spatiotemporal_graphs['latent'].true_posterior_mean = posterior_mean
+        spatiotemporal_graphs['latent'].true_posterior_std = posterior_std
+        if not advection == 'zero':
+            spatiotemporal_graphs['latent'].velocities = velocities.T
+
+        # print(spatiotemporal_graphs)
+
+        # joint graph that is compatible with original dgmrf code
+        graph_y = ptg.data.Data(edge_index=spatial_graphs["latent", "spatial", "latent"].edge_index, x=data.unsqueeze(1),
+                                mask=mask, pos=node_pos.repeat(T, 1), T=T, grid_size=grid_size)
+        graph_y.eigvals = utils.compute_eigenvalues(graph_y)
+
+        graph_post_mean = graph_y.clone()
+        graph_post_mean.x = posterior_mean
+
+        graph_post_std = graph_y.clone()
+        graph_post_std.x = posterior_std
+
+        data_dict = {
             "spatial_graph": spatial_graph,
             "temporal_graph": temporal_graph,
             "data": y,
@@ -375,10 +371,32 @@ def generate_data(grid_size, T, diffusion=0, advection='zero', obs_noise_std=0.0
             "joint_graph": joint_graph,
             "graph_y": graph_y,
             "graph_post_true_mean": graph_post_mean,
-            "graph_post_true_std": graph_post_std
-            }
-    if T>1:
+            "graph_post_true_std": graph_post_std,
+            "true_transition_matrix": F
+        }
+
+    else:
+        data_dict = {
+            "spatial_graph": spatial_graph,
+            "temporal_graph": temporal_graph,
+            "data": y,
+            "gt": states,
+            "masks": mask.reshape(T, -1)
+        }
+
+    if T > 1:
         data_dict["velocities"] = velocities
+        data_dict["true_transition_matrix"] = F
+
+
+
+
+    # test CG method
+    # mean_hat = cg_solve(posterior_eta, posterior_prec, rtol=1e-7)
+    # eigvals = spl.eigvals(posterior_prec).real
+    # print(f'condition number = {eigvals.max() / eigvals.min()}')
+
+
 
 
     return data_dict

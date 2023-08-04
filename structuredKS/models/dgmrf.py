@@ -1757,7 +1757,7 @@ class SpatiotemporalInference(pl.LightningModule):
             GtGx = self.dgmrf(Gx, transpose=True, with_bias=False)  # has shape [n_nodes, T, n_nodes]
 
             if self.noise_var is not None:
-                out = GtGx + (data_mask.to(torch.float64) / self.noise_var).view(1, self.T, -1) * x
+                out = GtGx + (data_mask.to(torch.float64) / self.noise_var).view(1, self.T, -1) * input
             else:
                 out = GtGx
 

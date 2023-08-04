@@ -26,6 +26,8 @@ args = parser.parse_args()
 
 df_sensors = pd.read_csv(osp.join(dir, 'sensors.csv'))
 
+#TODO: add additional unobserved sensor locations
+
 # bounds has order [north, west, south, east]
 bounds = [df_sensors.latitude.max() + 1, df_sensors.longitude.min() - 1,
           df_sensors.latitude.min() - 1, df_sensors.longitude.max() + 1]
