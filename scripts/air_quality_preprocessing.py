@@ -24,10 +24,13 @@ parser.add_argument("--t_start", type=int, default=0, help="start index of time 
 parser.add_argument("--t_end", type=int, default=-1, help="end index of time series")
 parser.add_argument("--year", type=int, default=2015, help="year to select")
 parser.add_argument("--month", type=int, default=3, help="month to select")
+parser.add_argument("--t_blocks", type=int, default=2, help="number of time blocks to mask")
 parser.add_argument("--data_split", type=list, default=0.9, help="fraction of non-test data to use for training, rest is used for validation")
 parser.add_argument("--standardize", default=False, action='store_true', help="Standardize data to mean=0, std=1")
 parser.add_argument("--mask", default='spatial_block', help="Type of mask; spatial_block, all_spatial, all_temporal, forecasting, or random")
 parser.add_argument("--mask_size", type=float, default=0.62, help="mask size in percentage of total area")
+parser.add_argument("--mask_shift_x", type=float, default=0.0, help="mask shift in x direction")
+parser.add_argument("--mask_shift_y", type=float, default=0.0, help="mask shift in y direction")
 parser.add_argument("--log_transform", default=True, action='store_true', help="apply log transform")
 parser.add_argument("--variable", type=str, default="PM25", help="Target variable")
 parser.add_argument("--obs_ratio", type=float, default=0.9, help="Fraction of points to observe")
@@ -74,11 +77,11 @@ G.eigvals = utils.compute_eigenvalues(G)
 if args.mask == 'spatial_block':
     # define block mask area
     xmin, xmax, ymin, ymax = G.pos[:, 0].min(), G.pos[:, 0].max(), G.pos[:, 1].min(), G.pos[:, 1].max()
-    xmin = xmin + (1 - args.mask_size) * (xmax-xmin)
-    xmax = xmax - (1 - args.mask_size) * (xmax-xmin)
-    ymin = ymin + (1 - args.mask_size) * (ymax-ymin)
-    ymax = ymax - (1 - args.mask_size) * (ymax-ymin)
-    test_mask = (G.pos[:, 0] > xmin) & (G.pos[:, 0] < xmax) & (G.pos[:, 1] > ymin) & (G.pos[:, 1] < ymax)
+    xmin = xmin + (1 - args.mask_size) * (xmax-xmin) / 2 + args.mask_shift_x * (xmax-xmin)
+    xmax = xmax - (1 - args.mask_size) * (xmax-xmin) / 2 + args.mask_shift_x * (xmax-xmin)
+    ymin = ymin + (1 - args.mask_size) * (ymax-ymin) / 2 + args.mask_shift_y * (ymax-ymin)
+    ymax = ymax - (1 - args.mask_size) * (ymax-ymin) / 2 + args.mask_shift_y * (ymax-ymin)
+    test_mask = (G.pos[:, 0] >= xmin) & (G.pos[:, 0] <= xmax) & (G.pos[:, 1] >= ymin) & (G.pos[:, 1] <= ymax)
 
     trainval_nodes = torch.logical_not(test_mask).nonzero().squeeze()
     n_val_nodes = int((1 - args.data_split) * trainval_nodes.numel() * 2)
@@ -273,7 +276,22 @@ if args.mask == 'spatial_block':
     # all_train_masks = torch.stack(all_train_masks, dim=0)
     # all_val_masks = torch.stack(all_val_masks, dim=0)
 
-    tidx = torch.arange(torch.ceil(0.2 * T), torch.ceil(0.7 * T), dtype=torch.long)
+    if args.t_blocks == 1:
+        tidx = torch.arange(torch.ceil(0.2 * T), torch.ceil(0.7 * T), dtype=torch.long)
+    else:
+        block_size = int((0.5 * T) / args.t_blocks)
+        random_tidx = torch.randperm(T - block_size)
+        starting_points = random_tidx[:args.t_blocks]
+
+        tidx = []
+        for s in starting_points:
+            tidx.append(torch.arange(s, s + block_size, dtype=torch.long))
+        tidx = torch.cat(tidx)
+
+        # tidx1 = torch.arange(torch.ceil(0.2 * T), torch.ceil(0.4 * T), dtype=torch.long)
+        # tidx2 = torch.arange(torch.ceil(0.6 * T), torch.ceil(0.8 * T), dtype=torch.long)
+        # tidx = torch.cat([tidx1, tidx2])
+
     all_test_masks = torch.zeros_like(all_masks)
     all_test_masks[tidx, :] = test_mask.view(1, -1).repeat(tidx.size(0), 1)
 
@@ -396,6 +414,6 @@ obs_ratio = args.mask_size if args.mask == "spatial_block" else args.obs_ratio
 
 # save graph
 ds_name = f'AQ_{args.variable}_T={T}_{args.year}_{args.month}_log={args.log_transform}_norm={args.standardize}_' \
-          f'mask={args.mask}_{obs_ratio}'
+          f'mask={args.mask}_{obs_ratio}_tblocks={args.t_blocks}'
 print(f'Saving dataset {ds_name}')
 utils_dgmrf.save_graph_ds(data, args, ds_name)
