@@ -1,5 +1,5 @@
 program: test_spdgmrf.py
-name: stdgmrf_sweep_no_features
+name: stdgmrf_sweep_diff_features
 command:
   - ${env}
   - ${interpreter}
@@ -10,7 +10,7 @@ command:
   - use_dynamics=true
   - use_dynamics_bias=true
   - use_features=false
-  - use_features_dynamics=false
+  - use_features_dynamics=true
   - vi_transition_type=diffusion
   - independent_time=false
   - final=true

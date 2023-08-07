@@ -69,7 +69,8 @@ def run_baselines(config: DictConfig):
     trainer = pl.Trainer(
         log_every_n_steps=1,
         logger=wandb_logger,
-        deterministic=True
+        deterministic=True,
+
     )
 
     if config.get('final', False):

@@ -812,8 +812,15 @@ class GNNAdvection(ptg.nn.MessagePassing):
             inputs = edge_attr
         else:
             edge_attr = edge_attr.unsqueeze(0).repeat(node_attr_i.size(0), 1, 1)
-            inputs = torch.cat([edge_attr, (node_attr_j + node_attr_i).transpose(1, 2)], dim=-1)
-
+            #if transpose:
+            #    inputs = torch.cat([edge_attr, node_attr_j.transpose(1, 2), node_attr_i.transpose(1, 2)], dim=-1)
+            #else:
+            #    inputs = torch.cat([edge_attr, node_attr_i.transpose(1, 2), node_attr_j.transpose(1, 2)], dim=-1)
+            #if transpose:
+            #    inputs = torch.cat([edge_attr, node_attr_i.transpose(1, 2)], dim=-1)
+            #else:
+            #    inputs = torch.cat([edge_attr, node_attr_i.transpose(1, 2)], dim=-1)
+            inputs = torch.cat([edge_attr, node_attr_i.transpose(1, 2)], dim=-1)
         # inputs = torch.cat([inputs.reshape(1, 1, *inputs.shape).repeat(x_i.size(0), x_i.size(1), 1, 1),
         #                     input_states_i.unsqueeze(-1) + input_states_j.unsqueeze(-1)], dim=-1)
 
@@ -1782,7 +1789,7 @@ class SpatiotemporalInference(pl.LightningModule):
 
 
         self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
-                                                        data_mask, self.config, self.noise_var,
+                                                        data_mask, self.config, self.noise_var, self.vi_mean,
                                                         features=self.features, verbose=False,
                                                         preconditioner=None)
                                                         #preconditioner=preconditioner)
@@ -1838,15 +1845,15 @@ class SpatiotemporalInference(pl.LightningModule):
 
         if not (hasattr(self, 'cg_mean') or hasattr(self, 'cg_std')):
             self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
-                                                            data_mask, self.config, self.noise_var,
+                                                            data_mask, self.config, self.noise_var, self.vi_mean,
                                                             features=self.features,
                                                             preconditioner=None)
                                                             #preconditioner=preconditioner2)
 
         if not hasattr(self, 'cg_samples'):
             self.post_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
-                                                 data_mask, self.config, self.noise_var, features=self.features,
-                                                 preconditioner=None, regularizer=100)
+                                                 data_mask, self.config, self.noise_var, self.vi_mean, features=self.features,
+                                                 preconditioner=None)
                                                  #preconditioner=self.vi_dist)
 
             # if self.use_features:
@@ -2130,7 +2137,7 @@ def get_bias(dgmrf, input_shape):
 #     return samples
 
 @torch.no_grad()
-def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, return_info=False, features=None,
+def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, initial_guess, return_info=False, features=None,
                      preconditioner=None):
     # Construct RHS using Papandeous and Yuille method
     bias = get_bias(dgmrf, data.size())
@@ -2164,22 +2171,24 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, return_inf
         #                             noise_var=noise_var, verbose=False, return_info=True, features=features,
         #                             preconditioner=preconditioner)
 
-    initial_guess = torch.zeros(rhs_sample.size())
+    initial_guess = initial_guess.repeat(n_samples, 1).reshape(rhs_sample.size())
     res_norm = torch.ones(data.size(0)) * float("inf")
     rhs_norm = torch.linalg.norm(rhs_sample, dim=1)
     k = 0
     cg_niter = 0
+    regularizer = config.get('cg_regularizer', 0)
     while (res_norm > config.get('outer_rtol', 1e-7) * rhs_norm).any() and (k < config.get('max_outer_iter', 100)):
         samples, cg_info = cg_solve(rhs_sample, dgmrf, mask, data.size(1), config,
                                       noise_var=noise_var, verbose=False, return_info=True,
                                       initial_guess=initial_guess, features=features,
-                                      preconditioner=preconditioner, regularizer=config.get('cg_regularizer', 0))
+                                      preconditioner=preconditioner, regularizer=regularizer)
 
         k = k + 1
         cg_niter += cg_info["niter"]
         res_norm = cg_info["res_norm"]
         print(f'relative residual norm after outer iteration {k} = {res_norm / rhs_norm}')
         initial_guess = samples.squeeze(-1)
+        regularizer = 0.1 * regularizer
 
     cg_info["niter"] = cg_niter
 
@@ -2212,7 +2221,7 @@ def sample_prior(n_samples, dgmrf, data_shape, config, preconditioner=None):
 
 
 @torch.no_grad()
-def posterior_mean(dgmrf, data, mask, config, noise_var, verbose=False, preconditioner=None, features=None,
+def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess, verbose=False, preconditioner=None, features=None,
                    return_info=False):
     # data has shape [n_batch, T, num_nodes]
     bias = get_bias(dgmrf, data.size())
@@ -2240,22 +2249,24 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, verbose=False, precondi
         post_mean = post_mean[0]
     else:
         # run CG iterations
-        initial_guess = torch.zeros(mean_rhs.size())
+        initial_guess = initial_guess.reshape(mean_rhs.size())
         res_norm = torch.ones(data.size(0)) * float("inf")
         rhs_norm = torch.linalg.norm(mean_rhs, dim=1)
         k = 0
         cg_niter = 0
+        regularizer = config.get('cg_regularizer', 0)
         while (res_norm > config.get('outer_rtol', 1e-7) * rhs_norm).any() and (k < config.get('max_outer_iter', 100)):
             post_mean, cg_info = cg_solve(mean_rhs, dgmrf, mask, data.size(1), config,
                                           noise_var=noise_var, verbose=verbose, return_info=True,
                                           initial_guess=initial_guess,
-                                          preconditioner=preconditioner, regularizer=config.get('cg_regularizer', 0))
+                                          preconditioner=preconditioner, regularizer=regularizer)
 
             k = k + 1
             cg_niter += cg_info["niter"]
             res_norm = cg_info["res_norm"]
             print(f'relative residual norm after outer iteration {k} = {res_norm / rhs_norm}')
             initial_guess = post_mean.squeeze(-1)
+            regularizer = 0.1 * regularizer
 
         post_mean = post_mean[0]
         cg_info["niter"] = cg_niter
@@ -2266,14 +2277,14 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, verbose=False, precondi
         return post_mean
 
 @torch.no_grad()
-def posterior_inference(dgmrf, data, mask, config, noise_var, features=None,
+def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess, features=None,
                         verbose=False, return_time=False, preconditioner=None):
     # data has shape [n_batch, T, num_nodes]
 
     print(f'compute posterior mean')
 
     start = timer()
-    post_mean, cg_info = posterior_mean(dgmrf, data, mask, config, noise_var, return_info=True, features=features,
+    post_mean, cg_info = posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess, return_info=True, features=features,
                                         preconditioner=preconditioner, verbose=verbose)
     end = timer()
     time_per_iter = (end - start) / cg_info["niter"]
@@ -2286,7 +2297,7 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, features=None,
     niter_list = []
     while cur_post_samples < config["n_post_samples"]:
         samples, cg_info = sample_posterior(config["n_training_samples"], dgmrf, data, mask, config,
-                                            noise_var, return_info=True, features=features,
+                                            noise_var, initial_guess, return_info=True, features=features,
                                             preconditioner=preconditioner)
         posterior_samples_list.append(samples)
         cur_post_samples += config["n_training_samples"]

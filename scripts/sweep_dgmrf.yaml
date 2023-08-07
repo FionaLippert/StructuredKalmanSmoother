@@ -6,10 +6,15 @@ command:
   - ${program}
   - ${args_no_hyphens}
   - use_dynamics=false
+  - use_features=false
   - transition_type=none
   - use_vi_dynamics=false
-  - learn_noise_std=true
+  - learn_noise_std=false
+  - noise_std=0.01
   - final=true
+  - weighted_dgmrf=true
+  - weighted_vi=false
+  - n_iterations=10000
 method: grid
 metric:
   name: test_rmse
@@ -21,9 +26,6 @@ parameters:
     values: [1, 2, 3, 4]
   independent_time:
     values: [false, true]
-  use_features:
-    values: [false, true]
   dataset:
-    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.62"',
-             '"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=all_temporal_0.9"']
+    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.8_tblocks=10"']
 

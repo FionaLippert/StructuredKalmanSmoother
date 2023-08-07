@@ -74,6 +74,8 @@ class NodeARIMA(pl.LightningModule):
 
     def evaluate(self, results, mask, split='test'):
 
+        mask = mask.to(self.gt.device)
+
         gt_mean = self.gt[mask].detach().numpy()
         x_hat = results['pred_mean'].flatten()[mask.detach().numpy()]
         std = results['pred_std'].flatten()[mask.detach().numpy()]
@@ -108,7 +110,8 @@ class NodeARIMA(pl.LightningModule):
         if self.final_prediction:
             # use all data except for test data
             # data_mask = torch.logical_and(self.mask, torch.logical_not(test_mask).flatten())
-            data_mask = torch.logical_and(self.mask, torch.logical_not(test_mask.flatten()))
+            print(self.mask.device, test_mask.device)
+            data_mask = torch.logical_and(self.mask, torch.logical_not(test_mask.flatten()).to(self.mask.device))
             split = 'test'
         else:
             # only use dedicated training data (neither validation nor test data)
@@ -126,7 +129,7 @@ class NodeARIMA(pl.LightningModule):
         if self.final_prediction:
             # use all data except for test data
             # data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask).flatten())
-            data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask.flatten()))
+            data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask.flatten()).to(self.mask.device))
         else:
             # only use dedicated training data (neither validation nor test data)
             data_mask = self.train_mask
