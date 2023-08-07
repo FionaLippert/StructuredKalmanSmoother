@@ -93,8 +93,10 @@ def run_dgmrf(config: DictConfig):
     if config.get('use_features', False) or config.get('use_features_dynamics', False):
         features = dataset_dict["covariates"].to(torch.float32)
         features = features - features.mean(0)
+        print('features std min', features.std(0).min())
         features = features / features.std(0)
         print(f'use {features.size(1)} features')
+        print(features.min(), features.max())
     else:
         features = None
 
@@ -233,12 +235,14 @@ def run_dgmrf(config: DictConfig):
         ds_test = DummyDataset(dataset_dict['test_masks'].reshape(-1), 1)
         dl_test = DataLoader(ds_test, batch_size=1, shuffle=False)
         trainer.test(model, dl_test)
-        results = trainer.predict(model, dl_test, return_predictions=True)
+        if config.get('save_prediction', False):
+            results = trainer.predict(model, dl_test, return_predictions=True)
     else:
         ds_val = DummyDataset(dataset_dict['val_masks'].reshape(-1), 1)
         dl_val = DataLoader(ds_val, batch_size=1, shuffle=False)
         trainer.test(model, dl_val)
-        results = trainer.predict(model, dl_val, return_predictions=True)
+        if config.get('save_prediction', False):
+            results = trainer.predict(model, dl_val, return_predictions=True)
 
     for param_name, param_value in model.dgmrf.state_dict().items():
         print("{}: {}".format(param_name, param_value))
@@ -253,15 +257,16 @@ def run_dgmrf(config: DictConfig):
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # save results
-    result_path = osp.join(ckpt_dir, config['experiment'], run.id, 'results')
-    os.makedirs(result_path, exist_ok=True)
-    with open(osp.join(result_path, 'results.pickle'), 'wb') as f:
-        pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
+    if config.get('save_prediction', False):
+        result_path = osp.join(ckpt_dir, config['experiment'], run.id, 'results')
+        os.makedirs(result_path, exist_ok=True)
+        with open(osp.join(result_path, 'results.pickle'), 'wb') as f:
+            pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-    # save as artifact for version control
-    artifact = wandb.Artifact(f'results-{run.id}', type='results')
-    artifact.add_dir(result_path)
-    run.log_artifact(artifact)
+        # save as artifact for version control
+        artifact = wandb.Artifact(f'results-{run.id}', type='results')
+        artifact.add_dir(result_path)
+        run.log_artifact(artifact)
 
     # save model
     model_path = osp.join(ckpt_dir, config['experiment'], run.id, 'models')

@@ -41,20 +41,23 @@ class KalmanSmoother:
             A = cov_lagged.sum(1) + (mean[:, 1:].unsqueeze(-1) @ mean[:, 1:].unsqueeze(2)).sum(1) # (batch, state, state)
             B = cov[:, :-1].sum(1) + (mean[:, :-1].unsqueeze(-1) @ mean[:, :-1].unsqueeze(2)).sum(1) # (batch, state, state)
             C = cov[:, 1:].sum(1) + (mean[:, 1:].unsqueeze(-1) @ mean[:, 1:].unsqueeze(2)).sum(1) # (batch, state, state)
-            B_inv = torch.inverse(B)
+            #B_inv = torch.inverse(B)
 
             error = data - (self.H.unsqueeze(1) @ mean.unsqueeze(-1)).squeeze() # (batch, time, state)
 
-            if 'F' in update: self.F = A @ B_inv
-            if 'Q' in update and 'F' in update:
-                self.Q = (C - A @ B_inv @ A.transpose(1, 2)) / (T - 1)
+            if 'F' in update: 
+                B_inv = torch.inverse(B)
+                self.F = A @ B_inv
+
+                if 'Q' in update:
+                    self.Q = (C - A @ B_inv @ A.transpose(1, 2)) / (T - 1)
             elif 'Q' in update:
                 self.Q = (C - 2 * self.F @ A + self.F @ B @ self.F.transpose(1, 2)) / (T - 1)
             # if 'R' in update: self.R = (error.unsqueeze(-1) @ error.unsqueeze(2) +
             #           self.H.unsqueeze(1) @ cov @ self.H.transpose(1, 2).unsqueeze(1)).mean(1)
             if 'mean' in update: self.initial_mean = mean[:, 0]
 
-            print(f'new F = {self.F}')
+            #print(f'new F = {self.F}')
 
             # self.initial_cov = ?
 
