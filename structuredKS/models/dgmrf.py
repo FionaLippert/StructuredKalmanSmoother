@@ -1883,7 +1883,7 @@ class SpatiotemporalInference(pl.LightningModule):
             #     self.post_samples = post_samples_x + self.features @ post_samples_beta
 
 
-        return {'post_mean': self.post_mean.reshape(self.T, self.num_nodes),
+        results =  {'post_mean': self.post_mean.reshape(self.T, self.num_nodes),
                 'post_std': self.post_std.reshape(self.T, self.num_nodes),
                 'post_samples': self.post_samples.reshape(-1, self.T, self.num_nodes),
                 'vi_mean': self.vi_mean,
@@ -1891,6 +1891,11 @@ class SpatiotemporalInference(pl.LightningModule):
                 'data': y_masked.reshape(self.T, self.num_nodes),
                 'gt': self.gt if hasattr(self, 'gt') else self.y_masked,
                 'predict_mask': predict_mask}
+
+        if self.config.get('save_transition_matrix', False):
+            results['transition_matrix'] = self.dgmrf.get_transition_matrix()
+
+        return results
 
 
     def KS_inference(self, test_mask, split):
