@@ -57,7 +57,8 @@ n_iterations: 10000
 inference_rtol: 1e-7
 outer_rtol: 1e-7
 max_cg_iter: 200
-max_outer_iter: 200
+max_outer_iter: 100
+cg_regularizer: 10
 device: gpu
 early_stopping_patience: 100
 
