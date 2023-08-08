@@ -132,7 +132,9 @@ def run_dgmrf(config: DictConfig):
                                     T=T, gt=dataset_dict.get('gt', None),
                                     data_mean=dataset_dict.get('data_mean', 0),
                                     data_std=dataset_dict.get('data_std', 1),
-                                    features=features)
+                                    features=features,
+                                    true_post_mean=dataset_dict.get("true_posterior_mean", None),
+                                    true_post_std=dataset_dict.get("true_posterior_std", None))
 
 
     for param_name, param_value in model.dgmrf.state_dict().items():

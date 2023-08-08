@@ -1468,6 +1468,9 @@ class SpatiotemporalInference(pl.LightningModule):
         self.data_mean = kwargs.get('data_mean', 0)
         self.data_std = kwargs.get('data_std', 1)
 
+        self.true_post_mean = kwargs.get('true_post_mean', None)
+        self.true_post_std = kwargs.get('true_post_std', None)
+
         # model components
         if self.use_dynamics:
 
@@ -1542,8 +1545,8 @@ class SpatiotemporalInference(pl.LightningModule):
 
         # adjust for each time step
         for t in range(self.T):
-            # get unobserved nodes for time t
-            jdx = (mask.view(self.T, -1)[t].to(torch.float32).flatten() - 1).nonzero().squeeze()
+            # get observed nodes for time t
+            jdx = mask.view(self.T, -1)[t].to(torch.float32).flatten().nonzero().squeeze()
 
             all_H.append(identity[jdx, :].unsqueeze(0))
             # jdx = (sub_mask[t] - 1).nonzero().squeeze()
@@ -1757,34 +1760,34 @@ class SpatiotemporalInference(pl.LightningModule):
         # y_masked[data_mask] = self.y_masked[data_mask]
         y_masked = self.y_masked * data_mask
 
-        def preconditioner(x, transpose=False):
-            # x has shape [nbatch, T, n_nodes]
-
-            #diag = 1 + torch.rand(1, 1, x.size(-1))
-            diag = torch.ones(1, 1, x.size(-1)) * 0.2 
-
-            return x * diag
-
-        def preconditioner2(x, transpose=False):
-            input = torch.eye(self.num_nodes).unsqueeze(1).repeat(1, self.T, 1) # shape [n_nodes, T, n_nodes]
-
-            Gx = self.dgmrf(input, with_bias=False)
-
-            #print(f'Gx min = {Gx.min()}, max = {Gx.max()}')
-            GtGx = self.dgmrf(Gx, transpose=True, with_bias=False)  # has shape [n_nodes, T, n_nodes]
-
-            #print(f'GtGx min = {GtGx.min()}, max = {GtGx.max()}')
-            if self.noise_var is not None:
-                out = GtGx + (data_mask.to(torch.float64) / self.noise_var).view(1, self.T, -1) * input
-            else:
-                out = GtGx
-
-            #print(f'out min = {out.min()}, max = {out.max()}')
-
-            diag = torch.diagonal(out, dim1=0, dim2=2)
-            #print(diag.min(), diag.max())
-
-            return x / diag.view(1, self.T, self.num_nodes).sqrt()
+        # def preconditioner(x, transpose=False):
+        #     # x has shape [nbatch, T, n_nodes]
+        #
+        #     #diag = 1 + torch.rand(1, 1, x.size(-1))
+        #     diag = torch.ones(1, 1, x.size(-1)) * 0.2
+        #
+        #     return x * diag
+        #
+        # def preconditioner2(x, transpose=False):
+        #     input = torch.eye(self.num_nodes).unsqueeze(1).repeat(1, self.T, 1) # shape [n_nodes, T, n_nodes]
+        #
+        #     Gx = self.dgmrf(input, with_bias=False)
+        #
+        #     #print(f'Gx min = {Gx.min()}, max = {Gx.max()}')
+        #     GtGx = self.dgmrf(Gx, transpose=True, with_bias=False)  # has shape [n_nodes, T, n_nodes]
+        #
+        #     #print(f'GtGx min = {GtGx.min()}, max = {GtGx.max()}')
+        #     if self.noise_var is not None:
+        #         out = GtGx + (data_mask.to(torch.float64) / self.noise_var).view(1, self.T, -1) * input
+        #     else:
+        #         out = GtGx
+        #
+        #     #print(f'out min = {out.min()}, max = {out.max()}')
+        #
+        #     diag = torch.diagonal(out, dim1=0, dim2=2)
+        #     #print(diag.min(), diag.max())
+        #
+        #     return x / diag.view(1, self.T, self.num_nodes).sqrt()
 
 
 
@@ -1807,11 +1810,11 @@ class SpatiotemporalInference(pl.LightningModule):
 
         self.log(f"{split}_mae_vi", residuals_vi.abs().mean().item(), sync_dist=True)
         self.log(f"{split}_rmse_vi", torch.pow(residuals_vi, 2).mean().sqrt().item(), sync_dist=True)
-        self.log(f"{split}_mape_vi", (residuals_vi / target).abs().mean().item(), sync_dist=True)
+        #self.log(f"{split}_mape_vi", (residuals_vi / target).abs().mean().item(), sync_dist=True)
 
         self.log(f"{split}_mae", residuals_cg.abs().mean().item(), sync_dist=True)
         self.log(f"{split}_rmse", torch.pow(residuals_cg, 2).mean().sqrt().item(), sync_dist=True)
-        self.log(f"{split}_mape", (residuals_cg / target).abs().mean().item(), sync_dist=True)
+        #self.log(f"{split}_mape", (residuals_cg / target).abs().mean().item(), sync_dist=True)
 
         pred_mean_np = self.post_mean.squeeze(-1)[test_mask].cpu().numpy()
         pred_std_np = self.post_std.squeeze(-1)[test_mask].cpu().numpy()
@@ -1819,6 +1822,24 @@ class SpatiotemporalInference(pl.LightningModule):
 
         self.log(f"{split}_crps", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
         self.log(f"{split}_int_score", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+
+        if self.true_post_mean is not None:
+            target = self.true_post_mean.reshape(-1)[test_mask]
+            residuals = target - self.post_mean.squeeze(-1)[test_mask]
+            self.log(f"{split}_mae_mean", residuals.abs().mean().item(), sync_dist=True)
+            self.log(f"{split}_rmse_mean", torch.pow(residuals, 2).mean().sqrt().item(), sync_dist=True)
+
+            target_np = target.cpu().numpy()
+
+            self.log(f"{split}_crps_mean", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+            self.log(f"{split}_int_score_mean", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+
+            if self.true_post_std is not None:
+                target_std = self.true_post_std.reshape(-1)[test_mask]
+                residuals_std = target_std - self.post_std.squeeze(-1)[test_mask]
+                self.log(f"{split}_mae_std", residuals_std.abs().mean().item(), sync_dist=True)
+                self.log(f"{split}_rmse_std", torch.pow(residuals_std, 2).mean().sqrt().item(), sync_dist=True)
+
 
 
     def predict_step(self, predict_mask, *args):

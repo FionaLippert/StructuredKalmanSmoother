@@ -26,24 +26,39 @@ class KalmanSmoother:
         self.T = len(self.H)
         self.batch_dim, self.state_dim = self.initial_mean.size()
 
+    def update_H(self, observation_models):
+        self.H = observation_models
+        self.T = len(self.H)
+
 
     def EM(self, data, iterations, update=['F', 'Q', 'R', 'mu', 'Sigma']):
 
         T = data.shape[1]
 
         for i in range(iterations):
+            print(f'iteration {i}')
             # E-step
+            #print(f'Q = {self.Q}')
             mean, cov, cov_lagged = self.smoother(data)
 
-            print(f'mean = {mean}')
+            assert not torch.isnan(cov_lagged).any()
+            assert not torch.isnan(cov).any()
+            assert not torch.isnan(mean).any()
+
+            assert not torch.isnan(cov_lagged.sum(1)).any()
+            #assert not torch.isnan((mean[:, :-1].unsqueeze(-1) @ mean[:, 1:].unsqueeze(-1)).sum(1)).any()
 
             # M-step
-            A = cov_lagged.sum(1) + (mean[:, 1:].unsqueeze(-1) @ mean[:, 1:].unsqueeze(2)).sum(1) # (batch, state, state)
+            A = cov_lagged.sum(1) + (mean[:, :-1].unsqueeze(-1) @ mean[:, 1:].unsqueeze(2)).sum(1) # (batch, state, state)
             B = cov[:, :-1].sum(1) + (mean[:, :-1].unsqueeze(-1) @ mean[:, :-1].unsqueeze(2)).sum(1) # (batch, state, state)
             C = cov[:, 1:].sum(1) + (mean[:, 1:].unsqueeze(-1) @ mean[:, 1:].unsqueeze(2)).sum(1) # (batch, state, state)
             #B_inv = torch.inverse(B)
 
-            error = data - (self.H.unsqueeze(1) @ mean.unsqueeze(-1)).squeeze() # (batch, time, state)
+            assert not torch.isnan(A).any()
+            assert not torch.isnan(B).any()
+            assert not torch.isnan(C).any()
+
+            # error = data - (self.H.unsqueeze(1) @ mean.unsqueeze(-1)).squeeze() # (batch, time, state)
 
             if 'F' in update: 
                 B_inv = torch.inverse(B)
@@ -52,7 +67,8 @@ class KalmanSmoother:
                 if 'Q' in update:
                     self.Q = (C - A @ B_inv @ A.transpose(1, 2)) / (T - 1)
             elif 'Q' in update:
-                self.Q = (C - 2 * self.F @ A + self.F @ B @ self.F.transpose(1, 2)) / (T - 1)
+                self.Q = (C - self.F @ A - A @ self.F.transpose(1, 2) + self.F @ B @ self.F.transpose(1, 2)) / (T - 1)
+                assert not torch.isnan(self.Q).any()
             # if 'R' in update: self.R = (error.unsqueeze(-1) @ error.unsqueeze(2) +
             #           self.H.unsqueeze(1) @ cov @ self.H.transpose(1, 2).unsqueeze(1)).mean(1)
             if 'mean' in update: self.initial_mean = mean[:, 0]
@@ -100,6 +116,8 @@ class KalmanSmoother:
                 cov_s = cov_filtered[:, tidx] + C @ residual_cov @ C.transpose(1, 2)
 
                 if tidx > 0:
+                    assert not torch.isnan(cov_predicted[:, tidx]).any()
+                    assert not torch.isnan(torch.inverse(cov_predicted[:, tidx])).any()
                     C_prev = cov_filtered[:, tidx - 1] @ transition.transpose(1, 2) @ torch.inverse(cov_predicted[:, tidx])
 
                     # cov_lag1 = cov_filtered[:, tidx] @ C_prev.transpose(1, 2) + \
@@ -140,12 +158,19 @@ class KalmanSmoother:
             # analysis
 
             #residual = data[:, t] - (self.H @ mean_p.T).T
+            # diff = data[:, t].unsqueeze(-1) - mean_p.unsqueeze(-1)
+            # print(f' diff contains {(diff == 0).to(torch.float32).mean() * 100}% zeros')
+            # print(f'number of obs at t={t}: {self.H[t].sum()}')
+            # print(f'number of data at t={t}: {(data[:, t] != 0).sum()}')
+            # #print(((self.H[t] @ data[:, t].unsqueeze(-1)) == 0).to(torch.float32).mean() * 100)
+            # print(data[:, t] == 0)
+            # print(self.H[t].sum(1) == 0)
             residual = self.H[t] @ (data[:, t].unsqueeze(-1) - mean_p.unsqueeze(-1))
             innovation = K @ residual #.unsqueeze(-1)
             mean_f = mean_p + innovation.squeeze(-1)
 
             diff = (torch.eye(self.state_dim) - K @ self.H[t])
-            cov_f = diff @ cov_p  #@ diff.transpose(1, 2) + K @ self.R @ K.transpose(1, 2)
+            cov_f = diff @ cov_p @ diff.transpose(1, 2) + self.sigma_obs * K @ K.transpose(1, 2)
 
             mean_filtered[:, t] = mean_f
             mean_predicted[:, t] = mean_p

@@ -8,6 +8,8 @@ from structuredKS.utils import crps_score, int_score
 import os
 import pickle
 
+from structuredKS.models.KS import KalmanSmoother
+
 class NodeARIMA(pl.LightningModule):
 
     def __init__(self, config, data, joint_mask, train_mask, T=1, gt=None, **kwargs):
@@ -136,6 +138,141 @@ class NodeARIMA(pl.LightningModule):
 
         predict_nodes = predict_mask.reshape(self.T, -1).sum(0).nonzero().flatten()
         results = self.forward(data_mask, predict_nodes)
+
+        return results
+
+
+class KS_EM(pl.LightningModule):
+
+    def __init__(self, config, data, joint_mask, train_mask, T=1, gt=None, **kwargs):
+        super(KS_EM, self).__init__()
+
+        self.T = T
+        self.y = data
+        self.mask = joint_mask
+        self.inv_mask = torch.logical_not(self.mask).reshape(T, -1)
+        self.num_nodes = self.inv_mask.size(1)
+        self.y_masked = torch.ones(self.mask.size(), dtype=self.y.dtype) * np.nan
+        self.y_masked[self.mask] = self.y
+
+        self.config = config
+
+        self.train_mask = train_mask
+        self.final_prediction = False # set to True for final model fitting and prediction
+
+        if gt is not None:
+            self.gt = gt
+        else:
+            self.gt = self.y_masked
+
+        initial_mean = torch.zeros(1, self.num_nodes)
+        initial_cov = 100 * torch.eye(self.num_nodes).unsqueeze(0)
+        transition_cov = 0.1 * torch.eye(self.num_nodes).unsqueeze(0)
+        transition_model = torch.eye(self.num_nodes).unsqueeze(0)
+        observation_models = self.all_H(train_mask)
+        observation_noise = config.get('noise_std')
+
+        self.KS = KalmanSmoother(initial_mean, initial_cov, transition_model, transition_cov,
+         observation_models, observation_noise)
+
+        # self.node_means = torch.tensor(np.nanmean(self.y_masked.reshape(self.T, -1), 0))
+
+    def all_H(self, mask):
+        # mask has shape [T * num_nodes]
+        # output is list of T tensors of shape [num_observed_nodes_t, num_nodes]
+
+        identity = torch.eye(self.num_nodes)
+        all_H = []
+
+        mask = mask.reshape(self.T, -1)
+
+        # adjust for each time step
+        for t in range(self.T):
+            # get observed nodes for time t
+            jdx = (mask[t].to(torch.float32).flatten()).nonzero().squeeze()
+
+            all_H.append(identity[jdx, :].unsqueeze(0))
+            # jdx = (sub_mask[t] - 1).nonzero().squeeze()
+
+        return all_H
+
+    def forward(self, data_mask, n_iterations=0):
+
+        y_masked = torch.zeros_like(self.y_masked)
+        y_masked[data_mask] = self.y_masked[data_mask]
+        y_masked = y_masked.reshape(self.T, self.num_nodes)
+
+        # print(f'y_masked contains {(y_masked == 0).to(torch.float32).mean() * 100}% zeros')
+
+        # update observation model according to mask
+        observation_models = self.all_H(data_mask)
+        self.KS.update_H(observation_models)
+
+        # estimate parameters with EM algorithm
+        self.KS.EM(y_masked.unsqueeze(0), n_iterations, update=['Q', 'mean'])
+
+        # estimate states with Kalman smoother
+        mean_smoothed, cov_smoothed, cov_lagged = self.KS.smoother(y_masked.unsqueeze(0))
+
+        std_smoothed = torch.diagonal(cov_smoothed, dim1=2, dim2=3)
+
+        return {'post_mean': mean_smoothed.reshape(self.T, self.num_nodes),
+                'post_std': std_smoothed.reshape(self.T, self.num_nodes),
+                'post_cov': cov_smoothed.reshape(self.T, self.num_nodes, self.num_nodes),
+                'data': y_masked,
+                'train_mask': data_mask,
+                'gt': self.gt if hasattr(self, 'gt') else 'NA'}
+
+    def evaluate(self, results, mask, split='test'):
+
+        # mask = mask.to(self.gt.device)
+
+        x_smoothed = results['post_mean'].flatten()[mask]
+        std_smoothed = results['post_std'].flatten()[mask]
+
+        print(std_smoothed.min(), std_smoothed.max())
+
+        targets = self.gt[mask]
+        residuals = targets - x_smoothed
+
+        self.log(f"{split}_mae", residuals.abs().mean().item(), sync_dist=True)
+        self.log(f"{split}_mse", torch.pow(residuals, 2).mean().item(), sync_dist=True)
+        self.log(f"{split}_rmse", torch.pow(residuals, 2).mean().sqrt().item(), sync_dist=True)
+        self.log(f"{split}_mape", (residuals / targets).abs().mean().item(), sync_dist=True)
+
+        x_smoothed_np = x_smoothed.to('cpu').detach().numpy()
+        std_smoothed_np = std_smoothed.to('cpu').detach().numpy()
+        targets_np = targets.to('cpu').detach().numpy()
+
+        self.log(f"{split}_crps", crps_score(x_smoothed_np, std_smoothed_np, targets_np), sync_dist=True)
+        self.log(f"{split}_int_score", int_score(x_smoothed_np, std_smoothed_np, targets_np), sync_dist=True)
+
+
+    def test_step(self, test_mask, *args):
+        if self.final_prediction:
+            # use all data except for test data
+            data_mask = torch.logical_and(self.mask, torch.logical_not(test_mask.flatten()).to(self.mask.device))
+            split = 'test'
+        else:
+            # only use dedicated training data (neither validation nor test data)
+            data_mask = self.train_mask
+            split = 'val'
+
+        results = self.forward(data_mask, n_iterations=self.config['n_iterations'])
+        self.evaluate(results, test_mask.flatten(), split=split)
+
+
+    def predict_step(self, predict_mask, *args):
+
+        if self.final_prediction:
+            # use all data except for test data
+            # data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask).flatten())
+            data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask.flatten()).to(self.mask.device))
+        else:
+            # only use dedicated training data (neither validation nor test data)
+            data_mask = self.train_mask
+
+        results = self.forward(data_mask, n_iterations=self.config['n_iterations'])
 
         return results
 

@@ -25,17 +25,15 @@ parser.add_argument("--n_dummy_sensors", type=int, default=0, help="number of du
 
 args = parser.parse_args()
 
-df_sensors = pd.read_csv(osp.join(dir, 'sensors.csv'))
-
-#TODO: add additional unobserved sensor locations
+if args.n_dummy_sensors > 0:
+    df_sensors = pd.read_csv(osp.join(dir, f'sensors_ndummy={args.n_dummy_sensors}.csv'))
+else:
+    df_sensors = pd.read_csv(osp.join(dir, 'sensors.csv'))
 
 # bounds has order [north, west, south, east]
 bounds = [df_sensors.latitude.max() + 1, df_sensors.longitude.min() - 1,
           df_sensors.latitude.min() - 1, df_sensors.longitude.max() + 1]
 
-if args.n_dummy_sensors > 0:
-    dummy_lon = np.random.rand(args.n_dummy_sensors) * (bounds[3] - bounds[1]) + bounds[1]
-    dummy_lon = np.random.rand(args.n_dummy_sensors) * (bounds[3] - bounds[1]) + bounds[1]
 
 # get covariates at all sensor locations for the given year and month
 ds = era5.load(era5_dir, bounds, covariates, args.month, args.year)
@@ -76,4 +74,7 @@ for var, values in all_covariates.items():
     df_covariates[var] = np.concatenate(values)
 
 # save data frame
-df_covariates.to_csv(osp.join(dir, f'covariates_{args.year}_{args.month}.csv'))
+if args.n_dummy_sensors > 0:
+    df_covariates.to_csv(osp.join(dir, f'covariates_{args.year}_{args.month}_ndummy={args.n_dummy_sensors}.csv'))
+else:
+    df_covariates.to_csv(osp.join(dir, f'covariates_{args.year}_{args.month}.csv'))
