@@ -6,7 +6,7 @@ command:
   - ${program}
   - ${args_no_hyphens}
   - final=False
-  - early_stopping_patience=10
+  - early_stopping_patience=100
   - MLP_nonlinearity="ReLU"
   - n_iterations=10000
   - save_prediction=false

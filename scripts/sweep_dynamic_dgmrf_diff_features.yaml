@@ -17,6 +17,7 @@ command:
   - weighted_dgmrf=true
   - weighted_vi=false
   - n_iterations=10000
+  - MLP_hidden_dim=16
 method: grid
 metric:
   name: test_rmse

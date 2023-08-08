@@ -95,6 +95,7 @@ def run_dgmrf(config: DictConfig):
         features = features - features.mean(0)
         print('features std min', features.std(0).min())
         features = features / features.std(0)
+        features = features[:, [0, 3, 4]]
         print(f'use {features.size(1)} features')
         print(features.min(), features.max())
     else:
