@@ -43,6 +43,7 @@ use_hierarchy: false
 transition_type: advection+diffusion
 n_layers_temporal: 1
 vi_transition_type: diffusion
+save_transition_matrix: false
 
 GNN_hidden_dim: 16
 
