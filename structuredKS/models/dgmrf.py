@@ -1125,8 +1125,12 @@ class TemporalDGMRF(torch.nn.Module):
 
     def get_matrix(self, dtype=torch.float32):
         # F_t = self.forward(torch.eye(num_nodes).reshape(1, 1, num_nodes, num_nodes), transpose=True, with_bias=False)
-        F_t = self.forward(torch.eye(self.num_nodes).reshape(self.num_nodes, 1, self.num_nodes).repeat(1, 2, 1),
-                transpose=True, with_bias=False, p=1)[:, 0, :].squeeze()
+        if self.use_features:
+            T = self.features.size(0)
+        else:
+            T = 2
+        F_t = self.forward(torch.eye(self.num_nodes).reshape(self.num_nodes, 1, self.num_nodes).repeat(1, T, 1),
+                transpose=True, with_bias=False, p=1)[:, :-1, :].squeeze()
 
         return F_t.to(dtype)
 
@@ -1310,7 +1314,7 @@ class VariationalDist(torch.nn.Module):
             out = x
 
         # multiply with diagonal matrix
-        out = self.std * out  # [T, dim] * [nbatch, T, dim]
+        out = self.std * x  # [T, dim] * [nbatch, T, dim]
 
         # multiply with \Tilde{S}
         for layer in self.layers:
@@ -1319,6 +1323,8 @@ class VariationalDist(torch.nn.Module):
         if self.layers:
             # multiply with post diagonal matrix
             out = self.post_diag.unsqueeze(0) * out # [1, T, dim] * [nbatch, T, dim]
+        #if hasattr(self, 'dynamics'):
+        #    out = out - self.dynamics(out, with_bias=False, transpose=False)
 
         return out # shape (nbatch, T, dim)
 
@@ -1326,6 +1332,12 @@ class VariationalDist(torch.nn.Module):
     def P_transpose(self, x):
         # apply factor P^T to vector x
         # x has shape [nbatch, T, dim]
+
+
+        #if hasattr(self, 'dynamics'):
+        #    out = x - self.dynamics(x, with_bias=False, transpose=True)
+        #else:
+        #    out = x
 
         if self.layers:
             # multiply with post diagonal matrix
@@ -1893,6 +1905,7 @@ class SpatiotemporalInference(pl.LightningModule):
                 'predict_mask': predict_mask}
 
         if self.config.get('save_transition_matrix', False):
+            print('save transition matrix')
             results['transition_matrix'] = self.dgmrf.get_transition_matrix()
 
         return results

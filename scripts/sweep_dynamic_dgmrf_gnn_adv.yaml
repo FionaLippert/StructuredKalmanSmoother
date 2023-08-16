@@ -26,15 +26,18 @@ metric:
   goal: minimize
 parameters:
   seed:
-    values: [0, 1, 2, 3, 4]
+    #values: [0, 1, 2, 3, 4]
+    values: [10, 11, 1, 2]
   n_layers:
     values: [2]
   transition_type:
     values: ["GNN_advection"]
   n_transitions:
-    values: [1, 2, 3, 4]
+    #values: [1, 2, 3, 4]
+    values: [4]
   use_vi_dynamics:
-    values: [ false, true ]
+    #values: [ false, true ]
+    values: [true]
   dataset:
     values: ['"spatiotemporal_30x30_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_0"']
 

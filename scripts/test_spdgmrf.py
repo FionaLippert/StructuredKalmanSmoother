@@ -239,6 +239,10 @@ def run_dgmrf(config: DictConfig):
         dl_test = DataLoader(ds_test, batch_size=1, shuffle=False)
         trainer.test(model, dl_test)
         if config.get('save_prediction', False):
+            #post_mean = model.post_mean.reshape(model.T, -1).to('cpu').detach()
+            #post_std = model.post_std.reshape(model.T, -1).to('cpu').detach()
+            #results = {'post_mean': post_mean, 'post_std': post_std}
+            
             results = trainer.predict(model, dl_test, return_predictions=True)
     else:
         ds_val = DummyDataset(dataset_dict['val_masks'].reshape(-1), 1)
