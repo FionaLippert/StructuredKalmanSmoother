@@ -106,9 +106,9 @@ def transition_matrix_exponential(coeffs, k_max=1):
     z = 1
     for i in range(k_max):
         k = i+1
-        z /= k
-        term_k = z * A @ term_k
-        F += term_k
+        z /= k # computes 1/(k!)
+        term_k = A @ term_k # computes A^k
+        F += z * term_k
 
     return F
 
