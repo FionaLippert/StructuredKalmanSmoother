@@ -912,21 +912,37 @@ class AdvectionDiffusionModel(ptg.nn.MessagePassing):
         self.edge_index_transpose = self.edge_index.flip(0)
         self.edge_attr = graph['edge_attr'] # normal vectors at cell boundaries
 
+        self.config = config
+
     @property
     def diff_coeff(self):
         # force diffusion coefficient to be positive
         return torch.pow(self.diff_param, 2)
 
     def forward(self, x, transpose=False, **kwargs):
-        agg_i, agg_j = self.propagate(self.edge_index, x=x, edge_attr=self.edge_attr)
+        # compute F_t @ x
 
-        if transpose:
-            agg_i_T, agg_j_T = self.propagate(self.edge_index_transpose, x=x, edge_attr=self.edge_attr)
-            update = agg_j_T + agg_i
-        else:
-            update = agg_j + agg_i
+        update = x
+        out = x
 
-        return x + update
+        factor = 1
+
+        for k in range(self.config.get('k_max', 1)):
+            # approximate matrix exponential up to order k_max
+
+            factor = factor / (k + 1)
+
+            agg_i, agg_j = self.propagate(self.edge_index, x=update, edge_attr=self.edge_attr)
+
+            if transpose:
+                agg_i_T, agg_j_T = self.propagate(self.edge_index_transpose, x=update, edge_attr=self.edge_attr)
+                update = agg_j_T + agg_i
+            else:
+                update = agg_j + agg_i
+
+            out = out + factor * update
+
+        return out
 
     def message(self, x_i, x_j, edge_attr):
         # construct messages to node i for each edge (j,i)
