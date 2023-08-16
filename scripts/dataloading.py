@@ -47,7 +47,7 @@ T = args.time_steps
 # generate data
 data = toydata.generate_data(args.grid_size, T, diffusion=args.diff, advection=args.advection,
                              obs_noise_std=args.obs_noise_std, obs_ratio=args.obs_ratio, seed=args.seed,
-                             n_transitions=args.n_transitions, block_obs=args.block_mask)
+                             n_transitions=args.n_transitions, block_obs=args.block_mask, k_max=args.k_max)
 
 # fig, ax = plt.subplots(1, 2, figsize=(8, 4))
 # v = data['velocities'].reshape(2, args.grid_size, args.grid_size)
@@ -153,6 +153,7 @@ data['grid_size'] = torch.tensor([args.grid_size, args.grid_size])
 
 # save graph
 ds_name = f'advection_{args.grid_size}x{args.grid_size}_obs={args.obs_ratio}_' \
-          f'T={T}_diff={args.diff}_adv={args.advection}_ntrans={args.n_transitions}_1block={args.block_mask}_{args.seed}'
+          f'T={T}_diff={args.diff}_adv={args.advection}_ntrans={args.n_transitions}_1block={args.block_mask}_' \
+          f'kmax={args.k_max}_{args.seed}'
 print(f'Saving dataset {ds_name}')
 utils.save_graph_ds(data, args, ds_name)
