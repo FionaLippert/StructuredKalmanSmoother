@@ -136,6 +136,8 @@ def run_baselines(config: DictConfig):
     F = transition_matrix_exponential(F_coeffs.to(torch.float64), k_max=2)
     F = torch.linalg.matrix_power(F, n_transitions)
 
+    advdiff = AdvectionDiffusionTransition(config, G_temp)
+
 
     def transition_model(ensemble, transpose=False):
         # simple identity transition function
@@ -145,22 +147,31 @@ def run_baselines(config: DictConfig):
         return ensemble
 
     def true_transition(ensemble, transpose=False):
-        # F = dataset_dict['true_transition_matrix'].to(torch.float64)
+        F = dataset_dict['true_transition_matrix'].to(torch.float64)
+
 
         if transpose:
             ensemble = F.transpose(0, 1) @ ensemble.to(torch.float64)
         else:
             ensemble = F @ ensemble.to(torch.float64)
 
+        ensemble = ensemble.to(torch.float64)
+        #
+        # for i in range(ensemble.size(-1)):
+        #     for t in range(4):
+        #         ensemble[:-3, i] = advdiff.forward(ensemble[:-3, i], velocity=torch.tensor([-0.3, 0.3]),
+        #                                            diffusion=torch.tensor([0.01]), transpose=transpose)
+
 
         return ensemble
 
-    advdiff = AdvectionDiffusionTransition(config, G_temp)
+
 
     def adv_diff_transition(ensemble, transpose=False):
         v = ensemble[-2:, :]
         #diffusion = torch.nn.functional.relu(ensemble[-3, :])
-        diffusion = torch.clamp(torch.pow(ensemble[-3, :], 2), min=0, max=1)
+        diffusion = torch.clamp(torch.pow(ensemble[-3, :], 2), min=0, max=0.5)
+        #diffusion = torch.clamp(ensemble[-3, :], min=0, max=0.5)
         print(f'average v = {v.mean(-1)}, abs max = {v.abs().max(-1)}')
         print(f'average diffusion = {diffusion.mean()}, abs max = {diffusion.abs().max()}')
 
@@ -169,6 +180,10 @@ def run_baselines(config: DictConfig):
 
         for i in range(ensemble.size(-1)):
             # treat each ensemble member separately
+
+            for t in range(4):
+                ensemble[:-3, i] = advdiff.forward(ensemble[:-3, i], velocity=v[:, i],
+                                                   diffusion=diffusion[i], transpose=transpose)
 
             # edge_velocities = (normals * v[:, i].unsqueeze(0)).sum(-1)  # [num_edges]
             # edge_velocities = ptg.utils.to_dense_adj(G_temp.edge_index, edge_attr=edge_velocities,
@@ -188,13 +203,11 @@ def run_baselines(config: DictConfig):
             # else:
             #     ensemble[:-3, i] = (F @ ensemble[:-3, i].unsqueeze(-1)).squeeze(-1)
 
-            for t in range(4):
-                ensemble[:-3, i] = advdiff.forward(ensemble[:-3, i], velocity=v[:, i],
-                                                   diffusion=diffusion[i], transpose=transpose)
+
 
         return ensemble
 
-    #
+
     # model = EnKS(config, data, joint_mask, dataset_dict['train_masks'].reshape(-1), true_transition,
     #              config.get('ensemble_size', 100),
     #               T=T, gt=dataset_dict.get('gt', None),
@@ -203,7 +216,7 @@ def run_baselines(config: DictConfig):
     #               )
 
     velocity = 2 * torch.rand(2, ) - 1
-    diff_param = torch.rand(1, ) * 0.5
+    diff_param = torch.rand(1, ) * 0.2
 
     print(f'initial velocity estimate = {velocity}')
     print(f'initial diffusion estimate = {torch.pow(diff_param, 2)}')
@@ -214,7 +227,7 @@ def run_baselines(config: DictConfig):
     model = EnKS(config, data, joint_mask, dataset_dict['train_masks'].reshape(-1), adv_diff_transition,
                  config.get('ensemble_size', 100),
                  initial_params=torch.cat([diff_param, velocity]),
-                 initial_std_params=torch.tensor([0.01, 0.01, 0.01]),
+                 initial_std_params=torch.tensor([0.01, 0.1, 0.1]),
                  T=T, gt=dataset_dict.get('gt', None),
                  true_post_mean=dataset_dict.get("true_posterior_mean", None),
                  true_post_std=dataset_dict.get("true_posterior_std", None)
