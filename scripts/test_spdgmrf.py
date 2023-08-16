@@ -246,13 +246,13 @@ def run_dgmrf(config: DictConfig):
         ds_test = DummyDataset(dataset_dict['test_masks'].reshape(-1), 1)
         dl_test = DataLoader(ds_test, batch_size=1, shuffle=False)
         trainer.test(model, dl_test)
-        if config.get('save_prediction', False):
-            results = {
-                    'post_mean': model.post_mean.reshape(model.T, -1),
-                    'post_std': model.post_std.reshape(model.T, -1)
-                    }
-            #results = trainer.predict(model, dl_test, return_predictions=True)
-    else:
+        if config.get('save_prediction', False): 
+            results = trainer.predict(model, dl_test, return_predictions=True)
+            #results = {
+            #        'post_mean': model.post_mean.reshape(model.T, -1),
+            #        'post_std': model.post_std.reshape(model.T, -1)
+            #        }
+                else:
         ds_val = DummyDataset(dataset_dict['val_masks'].reshape(-1), 1)
         dl_val = DataLoader(ds_val, batch_size=1, shuffle=False)
         trainer.test(model, dl_val)

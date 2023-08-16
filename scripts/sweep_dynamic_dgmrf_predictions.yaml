@@ -1,5 +1,5 @@
 program: test_spdgmrf.py
-name: stdgmrf_sweep_adv+diff
+name: stdgmrf_sweep_predictions
 command:
   - ${env}
   - ${interpreter}
@@ -10,15 +10,18 @@ command:
   - use_dynamics=true
   - use_dynamics_bias=true
   - use_features=false
-  - use_features_dynamics=false
+  - use_features_dynamics=true
   - vi_transition_type=diffusion
   - independent_time=false
   - final=true
-  - weighted_dgmrf=false
+  - weighted_dgmrf=true
   - weighted_vi=false
   - n_iterations=10000
+  - GNN_hidden_dim=16
+  - MLP_hidden_dim=16
   - cg_regularizer=10
-  - +mask_width=9
+  - max_cg_iter=500
+  - max_outer_iter=100
   - save_prediction=true
   - save_transition_matrix=true
 method: grid
@@ -27,19 +30,23 @@ metric:
   goal: minimize
 parameters:
   seed:
-    #values: [8, 9]
-    values: [0, 1, 2, 3, 4]
+    #values: [4]
+    values: [4]
   n_layers:
     values: [2]
   transition_type:
-    values: ["advection+diffusion"]
+    values: ["GNN_advection"]
   n_transitions:
-    values: [1, 2, 3, 4]
     #values: [4]
+    values: [2]
+  n_layers_temporal:
+    #values: [2]
+    values: [2]
   use_vi_dynamics:
-    #values: [ false, true ]
-    values: [true]
+    #values: [true]
+    values: [true ]
   dataset:
-    values: ['"spatiotemporal_30x30_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_0"']
+    #values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=forecasting_0.9"']
+    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.8_tblocks=10"']
 
 

@@ -17,6 +17,7 @@ command:
   - weighted_dgmrf=true
   - weighted_vi=false
   - n_iterations=10000
+  - cg_regularizer=10
 method: grid
 metric:
   name: test_rmse
@@ -35,6 +36,7 @@ parameters:
   use_vi_dynamics:
     values: [ false, true ]
   dataset:
-    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.8_tblocks=10"']
+    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=forecasting_0.9"']
+    #values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.8_tblocks=10"']
 
 

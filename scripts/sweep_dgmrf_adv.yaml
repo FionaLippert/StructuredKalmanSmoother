@@ -16,7 +16,7 @@ command:
   - weighted_vi=false
   - n_iterations=10000
   - cg_regularizer=0
-  - +mask_width=9
+  - +mask_width=6
 method: grid
 metric:
   name: test_rmse
@@ -25,9 +25,9 @@ parameters:
   seed:
     values: [0, 1, 2, 3, 4]
   n_layers:
-    values: [4]
+    values: [2]
   independent_time:
     values: [false, true]
   dataset:
-    values: ['"spatiotemporal_30x30_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_0"']
+    values: ['"spatiotemporal_30x30_obs=0.95_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_0"']
 
