@@ -959,7 +959,12 @@ class AdvectionDiffusionTransition(ptg.nn.MessagePassing):
         x = states.to(torch.float64)
         out = states.to(torch.float64)
 
+        factor = 1
+
         for k in range(2):
+
+            factor = factor / (k + 1)
+
             agg_i, agg_j = self.propagate(self.edge_index, x=x, edge_attr=self.edge_attr.to(torch.float64),
                                           v=velocity.to(torch.float64), diff=diffusion.to(torch.float64))
             if transpose:
@@ -969,7 +974,7 @@ class AdvectionDiffusionTransition(ptg.nn.MessagePassing):
             else:
                 x = agg_j + agg_i
 
-            out = out + (-0.5)**k * x
+            out = out + factor * x
 
         return out
 
@@ -978,6 +983,7 @@ class AdvectionDiffusionTransition(ptg.nn.MessagePassing):
         # edge_attr has shape [num_edges, 2]
         # v has shape [2]
         # diff has shape [1]
+
         adv_coef = -0.5 * (edge_attr @ v.unsqueeze(-1)).squeeze(-1) # shape [num_edges]
         msg_i = (adv_coef - diff) * x_i
         msg_j = (adv_coef + diff) * x_j
