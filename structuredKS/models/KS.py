@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch_geometric as ptg
 import pytorch_lightning as pl
 import math
 from torch_geometric.nn import MessagePassing
@@ -31,51 +32,72 @@ class KalmanSmoother:
         self.T = len(self.H)
 
 
-    def EM(self, data, iterations, update=['F', 'Q', 'R', 'mu', 'Sigma']):
+    def EM(self, data, iterations, update=['alpha', 'F', 'Q', 'R', 'mu', 'Sigma'], eps=1e-3):
 
         T = data.shape[1]
 
-        for i in range(iterations):
+        mean, cov, cov_lagged = self.smoother(data)
+        i = 0
+        delta = float("inf")
+
+        while i < iterations and delta > eps:
             print(f'iteration {i}')
             # E-step
             #print(f'Q = {self.Q}')
-            mean, cov, cov_lagged = self.smoother(data)
+            old_mean = mean
+            delta_old = delta
 
-            assert not torch.isnan(cov_lagged).any()
-            assert not torch.isnan(cov).any()
-            assert not torch.isnan(mean).any()
+            for var in update:
+                assert not torch.isnan(cov_lagged).any()
+                assert not torch.isnan(cov).any()
+                assert not torch.isnan(mean).any()
 
-            assert not torch.isnan(cov_lagged.sum(1)).any()
-            #assert not torch.isnan((mean[:, :-1].unsqueeze(-1) @ mean[:, 1:].unsqueeze(-1)).sum(1)).any()
+                assert not torch.isnan(cov_lagged.sum(1)).any()
+                #assert not torch.isnan((mean[:, :-1].unsqueeze(-1) @ mean[:, 1:].unsqueeze(-1)).sum(1)).any()
 
-            # M-step
-            A = cov_lagged.sum(1) + (mean[:, :-1].unsqueeze(-1) @ mean[:, 1:].unsqueeze(2)).sum(1) # (batch, state, state)
-            B = cov[:, :-1].sum(1) + (mean[:, :-1].unsqueeze(-1) @ mean[:, :-1].unsqueeze(2)).sum(1) # (batch, state, state)
-            C = cov[:, 1:].sum(1) + (mean[:, 1:].unsqueeze(-1) @ mean[:, 1:].unsqueeze(2)).sum(1) # (batch, state, state)
-            #B_inv = torch.inverse(B)
+                # M-step
+                A = cov_lagged.sum(1) + (mean[:, :-1].unsqueeze(-1) @ mean[:, 1:].unsqueeze(2)).sum(1) # (batch, state, state)
+                B = cov[:, :-1].sum(1) + (mean[:, :-1].unsqueeze(-1) @ mean[:, :-1].unsqueeze(2)).sum(1) # (batch, state, state)
+                C = cov[:, 1:].sum(1) + (mean[:, 1:].unsqueeze(-1) @ mean[:, 1:].unsqueeze(2)).sum(1) # (batch, state, state)
+                #B_inv = torch.inverse(B)
 
-            assert not torch.isnan(A).any()
-            assert not torch.isnan(B).any()
-            assert not torch.isnan(C).any()
+                assert not torch.isnan(A).any()
+                assert not torch.isnan(B).any()
+                assert not torch.isnan(C).any()
 
-            # error = data - (self.H.unsqueeze(1) @ mean.unsqueeze(-1)).squeeze() # (batch, time, state)
+                # error = data - (self.H.unsqueeze(1) @ mean.unsqueeze(-1)).squeeze() # (batch, time, state)
 
-            if 'F' in update: 
-                B_inv = torch.inverse(B)
-                self.F = A @ B_inv
 
-                if 'Q' in update:
-                    self.Q = (C - A @ B_inv @ A.transpose(1, 2)) / (T - 1)
-            elif 'Q' in update:
-                self.Q = (C - self.F @ A - A @ self.F.transpose(1, 2) + self.F @ B @ self.F.transpose(1, 2)) / (T - 1)
-                assert not torch.isnan(self.Q).any()
-            # if 'R' in update: self.R = (error.unsqueeze(-1) @ error.unsqueeze(2) +
-            #           self.H.unsqueeze(1) @ cov @ self.H.transpose(1, 2).unsqueeze(1)).mean(1)
-            if 'mean' in update: self.initial_mean = mean[:, 0]
+                if var == 'alpha':
+                    traceA = torch.diagonal(A, dim1=-1, dim2=-2).sum(-1)
+                    traceB = torch.diagonal(B, dim1=-1, dim2=-2).sum(-1)
+                    alpha = traceA / traceB
+                    
+                    self.F = alpha.reshape(-1, 1, 1) * torch.eye(self.state_dim).unsqueeze(0).repeat(self.batch_dim, 1, 1)
+                    print(f'alpha = {alpha}')
+                elif var == 'F':
+                    B_inv = torch.inverse(B)
+                    self.F = A @ B_inv
 
-            #print(f'new F = {self.F}')
+                    # if 'Q' in update:
+                    #     self.Q = (C - A @ B_inv @ A.transpose(1, 2)) / (T - 1)
+                if var == 'Q':
+                    self.Q = (C - self.F @ A - A @ self.F.transpose(1, 2) + self.F @ B @ self.F.transpose(1, 2)) / (T - 1)
+                    assert not torch.isnan(self.Q).any()
+                # if 'R' in update: self.R = (error.unsqueeze(-1) @ error.unsqueeze(2) +
+                #           self.H.unsqueeze(1) @ cov @ self.H.transpose(1, 2).unsqueeze(1)).mean(1)
+                if var == 'mean': self.initial_mean = mean[:, 0]
 
-            # self.initial_cov = ?
+
+                mean, cov, cov_lagged = self.smoother(data)
+
+            delta = torch.pow(mean - old_mean, 2).mean()
+            print(f'delta = {delta}')
+
+            if delta > delta_old: break
+
+
+            i = i + 1
 
     def smoother(self, data):
 
@@ -194,6 +216,150 @@ class KalmanSmoother:
             cov[:, t] = (transition @ cov[:, t-1] @ transition.transpose(1, 2)) + self.Q#.unsqueeze(0)
 
         return mean, cov
+
+
+class EnsembleKalmanSmoother:
+
+    def __init__(self, ensemble_size, initial_mean, initial_cov_factor, transition_model, transition_cov_factor,
+                 observation_models, observation_noise):
+
+        self.ensemble_size = ensemble_size
+
+        self.initial_mean = initial_mean  # size [state]
+        self.initial_cov_factor = initial_cov_factor  # size [state, state]
+        self.transition_model = transition_model  # function
+        self.transition_cov_factor = transition_cov_factor  # size [state, state]
+        self.H = observation_models  # list of tensors with size [data_t, state]
+        self.sigma_obs = observation_noise
+
+        self.T = len(self.H)
+        self.state_dim = self.initial_mean.size(0)
+
+
+    def update_H(self, observation_models):
+        self.H = observation_models
+        self.T = len(self.H)
+
+    def smoother(self, data):
+
+        T = data.shape[0]
+
+        state_ensembles_f, state_ensembles_p = self.filter(data)
+
+        state_ensembles_s = torch.zeros(T, self.state_dim, self.ensemble_size)
+
+        for t in range(T):
+            # index to be updated
+            tidx = T - t - 1
+
+            if t == 0:
+                # last filtered state is same as smoothed state
+                state_ensembles_s[tidx] = state_ensembles_f[tidx]
+            else:
+                residuals = state_ensembles_s[tidx + 1] - state_ensembles_p[tidx + 1]
+
+                # ensemple covariances
+                cov_p = self.ensemble_cov(state_ensembles_p[tidx + 1])
+                cov_f = self.ensemble_cov(state_ensembles_f[tidx])
+
+                # apply inverse, or alternatively solve with CG or Cholesky
+                residuals = torch.inverse(cov_p) @ residuals # shape [state_dim, ensemble_size]
+
+                # push residuals through transition model (if not linear, linearize it around filtered mean)
+                #residuals = self.transition_model(residuals, transpose=True)
+
+                # smoothed ensemble
+                # state_ensembles_s[tidx] = state_ensembles_f[tidx] + cov_f @ residuals
+
+                cov_lagged = self.ensemble_cov(state_ensembles_f[tidx], state_ensembles_p[tidx + 1])
+                state_ensembles_s[tidx] = state_ensembles_f[tidx] + cov_lagged @ residuals
+
+
+        return state_ensembles_f, state_ensembles_p, state_ensembles_s
+
+
+    def filter(self, data):
+        # data has shape [T, num_obs]
+
+        T = data.shape[0]
+
+        # mean_filtered = torch.zeros(T, self.state_dim)
+        # mean_predicted = torch.zeros(T, self.state_dim)
+        # cov_filtered = torch.zeros(T, self.state_dim, self.state_dim)
+        # cov_predicted = torch.zeros(T, self.state_dim, self.state_dim)
+
+        state_ensembles_p = torch.zeros(T, self.state_dim, self.ensemble_size)
+        state_ensembles_f = torch.zeros(T, self.state_dim, self.ensemble_size)
+
+        state_ensembles_p[0] = self.initial_mean.view(self.state_dim, 1) + \
+                         self.initial_cov_factor @ torch.randn(self.state_dim, self.ensemble_size)
+        data_ensembles = data.unsqueeze(-1) + self.sigma_obs * torch.randn(T, data.size(1), self.ensemble_size)
+
+        for t in range(T):
+
+            if t > 0:
+                # forecast
+                model_error = self.transition_cov_factor @ torch.randn(self.state_dim, self.ensemble_size)
+                # print('model error', model_error)
+                state_ensembles_p[t] = self.transition_model(state_ensembles_f[t-1]) + model_error
+
+            if torch.any(torch.isnan(state_ensembles_p)):
+                print(f'found NaNs in predicted ensemble at time t={t}')
+
+            #print(state_ensembles_p[t])
+
+            # ensemble covariance
+            cov_p = self.ensemble_cov(state_ensembles_p[t])
+
+            # print(f'cov_p = {cov_p}')
+
+            # state_ensembles_f[t] = state_ensembles_p[t]
+
+
+            # Kalman gain
+            K = cov_p @ self.H[t].transpose(0, 1) @ torch.inverse((self.H[t] @
+                                                                   cov_p @ self.H[t].transpose(0, 1)) + self.sigma_obs)
+            # TODO: implement more efficient version for large number of observations M
+
+            # print(f'K = {K}')
+
+            # if torch.any(torch.isnan(K)):
+            #     print(f'found NaNs in Kalman gain at time t={t}')
+            #     print(torch.inverse((self.H[t] @ cov_p @ self.H[t].transpose(0, 1)) + self.sigma_obs))
+            #     print(cov_p.max(), cov_p.min())
+            #     assert 0
+            #
+            # analysis
+            residual = self.H[t] @ (data_ensembles[t] - state_ensembles_p[t])
+            innovation = K @ residual
+            # print(f'innovation = {innovation}')
+            # print(f'data ensemble mean = {data_ensembles[t].mean(-1)}')
+            # print(f'residual mean = {residual.mean(-1)}')
+            # print(f'prediction mean = {state_ensembles_p[t].mean(-1)}')
+            # assert 0
+            state_ensembles_f[t] = state_ensembles_p[t] + innovation
+
+            if t==0:
+                print(residual)
+                print(innovation)
+
+            # if torch.any(torch.isnan(state_ensembles_f)):
+            #     print(f'found NaNs in filtered ensemble at time t={t}')
+
+        return state_ensembles_f, state_ensembles_p
+
+    def ensemble_cov(self, ensemble_1, ensemble_2=None):
+        A_1 = ensemble_1 - ensemble_1.mean(-1).unsqueeze(-1)  # [state_dim, ensemble_size] or [T, state_dim, ensemble_size]
+
+        if ensemble_2 is None:
+            A_2 = A_1
+        else:
+            A_2 = ensemble_2 - ensemble_2.mean(-1).unsqueeze(
+                -1)  # [state_dim, ensemble_size] or [T, state_dim, ensemble_size]
+        cov = A_1 @ A_2.transpose(-2, -1) / (self.ensemble_size - 1)
+
+        return cov
+
 
 
 
@@ -773,6 +939,50 @@ class KSMLE(pl.LightningModule):
         return optimizer
 
 
+class AdvectionDiffusionTransition(ptg.nn.MessagePassing):
+    """
+    Compute x_{t+1} = Fx_t, where F is based on discretized advection
+    """
+
+    def __init__(self, config, graph):
+        super(AdvectionDiffusionTransition, self).__init__(aggr='add', flow="target_to_source", node_dim=-1)
+
+        self.edge_index = graph['edge_index']
+        self.edge_index_transpose = self.edge_index.flip(0)
+        self.edge_attr = graph['edge_attr'] # normal vectors at cell boundaries
+
+    def forward(self, states, velocity, diffusion, transpose=False, **kwargs):
+        # states has shape [num_nodes]
+        # velocity_params has shape [2]
+        # diffusion_params has shape [1]
+
+        x = states.to(torch.float64)
+        out = states.to(torch.float64)
+
+        for k in range(2):
+            agg_i, agg_j = self.propagate(self.edge_index, x=x, edge_attr=self.edge_attr.to(torch.float64),
+                                          v=velocity.to(torch.float64), diff=diffusion.to(torch.float64))
+            if transpose:
+                agg_i_T, agg_j_T = self.propagate(self.edge_index_transpose, x=x, edge_attr=self.edge_attr.to(torch.float64),
+                                                  v=velocity.to(torch.float64), diff=diffusion.to(torch.float64))
+                x = agg_j_T + agg_i
+            else:
+                x = agg_j + agg_i
+
+            out = out + (-0.5)**k * x
+
+        return out
+
+    def message(self, x_i, x_j, edge_attr, v, diff):
+        # construct messages to node i for each edge (j,i)
+        # edge_attr has shape [num_edges, 2]
+        # v has shape [2]
+        # diff has shape [1]
+        adv_coef = -0.5 * (edge_attr @ v.unsqueeze(-1)).squeeze(-1) # shape [num_edges]
+        msg_i = (adv_coef - diff) * x_i
+        msg_j = (adv_coef + diff) * x_j
+
+        return torch.stack([msg_i, msg_j], dim=0)
 
 
 

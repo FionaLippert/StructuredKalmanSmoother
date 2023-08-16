@@ -68,7 +68,10 @@ def run_baselines(config: DictConfig):
     T = masks.size(0)
     print(f'data = {data}')
     model = KS_EM(config, data, joint_mask, dataset_dict['train_masks'].reshape(-1),
-                      T=T, gt=dataset_dict.get('gt', None))
+                  T=T, gt=dataset_dict.get('gt', None),
+                  true_post_mean=dataset_dict.get("true_posterior_mean", None),
+                  true_post_std=dataset_dict.get("true_posterior_std", None)
+                  )
 
 
     # dataloaders contain data masks defining which observations to use for training, validation, testing

@@ -35,13 +35,19 @@ parser.add_argument("--log_transform", default=True, action='store_true', help="
 parser.add_argument("--variable", type=str, default="PM25", help="Target variable")
 parser.add_argument("--obs_ratio", type=float, default=0.9, help="Fraction of points to observe")
 parser.add_argument("--max_dist", type=float, default=160000, help="Max distance between connected nodes in graph")
+parser.add_argument("--n_dummy_sensors", type=int, default=0, help="number of dummy sensors to include")
 
 args = parser.parse_args()
 
-df_sensors = pd.read_csv(osp.join(dir, 'sensors.csv'))
+if args.n_dummy_sensors > 0:
+    df_sensors = pd.read_csv(osp.join(dir, f'sensors_ndummy={args.n_dummy_sensors}.csv'))
+    df_covariates = pd.read_csv(osp.join(dir, f'covariates_{args.year}_{args.month}_ndummy={args.n_dummy_sensors}.csv'))
+else:
+    df_sensors = pd.read_csv(osp.join(dir, 'sensors.csv'))
+    df_covariates = pd.read_csv(osp.join(dir, f'covariates_{args.year}_{args.month}.csv'))
+
 df_measurements = pd.read_csv(osp.join(dir, 'measurements.csv'))
-# df_meteo = pd.read_csv(osp.join(dir, 'meteorology.csv'))
-df_covariates = pd.read_csv(osp.join(dir, f'covariates_{args.year}_{args.month}.csv'))
+
 
 print(f'longitude: min = {df_sensors.longitude.min()}, max = {df_sensors.longitude.max()}')
 print(f'latitude: min = {df_sensors.latitude.min()}, max = {df_sensors.latitude.max()}')
@@ -146,10 +152,12 @@ G_nx = ptg.utils.convert.to_networkx(G)
 # norm = Normalize(vmin=df_sub[variable].min(), vmax=df_sub[variable].max())
 
 fig, ax = plt.subplots(figsize=(10, 10))
-colors = ['green' if test_mask[i] else 'red' for i in range(len(G_nx))]
-nx.draw_networkx_nodes(G_nx, pos, node_size=20, node_color=colors, ax=ax, alpha=0.7)
+test_color = '#0099cc'
+train_color = '#cccc00'
+colors = [test_color if test_mask[i] else train_color for i in range(len(G_nx))]
+nx.draw_networkx_nodes(G_nx, pos, node_size=20, node_color=colors, ax=ax, alpha=0.6)
 nx.draw_networkx_edges(G_nx, pos, ax=ax, width=0.5, arrowsize=0.1)
-fig.savefig(osp.join(dir, f'sensor_network_{args.max_dist}.png'), dpi=200)
+fig.savefig(osp.join(dir, f'sensor_network_{args.max_dist}_ndummy={args.n_dummy_sensors}.png'), dpi=200)
 
 
 
@@ -228,6 +236,12 @@ all_covariates = all_covariates * 2 - 1 # scale to range (-1, 1)
 
 print(all_covariates.min(0), all_covariates.max(0))
 
+fig, ax = plt.subplots(figsize=(10, 10))
+colors = ['green' if all_masks[:, i].any() else 'red' for i in range(len(G_nx))]
+nx.draw_networkx_nodes(G_nx, pos, node_size=20, node_color=colors, ax=ax, alpha=0.7)
+nx.draw_networkx_edges(G_nx, pos, ax=ax, width=0.5, arrowsize=0.1)
+fig.savefig(osp.join(dir, f'observed_nodes_{args.max_dist}_ndummy={args.n_dummy_sensors}.png'), dpi=200)
+
 
 def remove_outliers(x, delta=2.0):
     # x has shape [num_nodes, T]
@@ -280,6 +294,7 @@ if args.mask == 'spatial_block':
         tidx = torch.arange(torch.ceil(0.2 * T), torch.ceil(0.7 * T), dtype=torch.long)
     else:
         block_size = int((0.5 * T) / args.t_blocks)
+        print(f'length of time blocks = {block_size}')
         random_tidx = torch.randperm(T - block_size)
         starting_points = random_tidx[:args.t_blocks]
 
@@ -309,7 +324,7 @@ if args.mask == 'spatial_block':
         colors[i] = (0, 0, 1, 0.7)
     nx.draw_networkx_nodes(G_nx, pos, node_size=10, node_color=colors, ax=ax, alpha=0.7)
     nx.draw_networkx_edges(G_nx, pos, ax=ax, width=0.5, arrowsize=0.1)
-    fig.savefig(osp.join(dir, 'masked_sensors.png'), dpi=200)
+    fig.savefig(osp.join(dir, f'masked_sensors_ndummy={args.n_dummy_sensors}.png'), dpi=200)
 
 elif args.mask == 'all_spatial':
     # mask all nodes for a random set of time points
@@ -359,6 +374,7 @@ elif args.mask == 'all_temporal':
     all_val_masks[:, random_idx[(n_test + n_train):]] = 1
 
 else:
+    # pick random nodes and time points
     n_obs = joint_mask.sum()
     random_idx = torch.randperm(n_obs)
     n_trainval = int(n_obs * args.obs_ratio)
@@ -414,6 +430,6 @@ obs_ratio = args.mask_size if args.mask == "spatial_block" else args.obs_ratio
 
 # save graph
 ds_name = f'AQ_{args.variable}_T={T}_{args.year}_{args.month}_log={args.log_transform}_norm={args.standardize}_' \
-          f'mask={args.mask}_{obs_ratio}_tblocks={args.t_blocks}'
+          f'mask={args.mask}_{obs_ratio}_tblocks={args.t_blocks}_ndummy={args.n_dummy_sensors}'
 print(f'Saving dataset {ds_name}')
 utils_dgmrf.save_graph_ds(data, args, ds_name)

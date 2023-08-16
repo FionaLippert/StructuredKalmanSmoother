@@ -8,7 +8,7 @@ from structuredKS.utils import crps_score, int_score
 import os
 import pickle
 
-from structuredKS.models.KS import KalmanSmoother
+from structuredKS.models.KS import KalmanSmoother, EnsembleKalmanSmoother
 
 class NodeARIMA(pl.LightningModule):
 
@@ -33,6 +33,9 @@ class NodeARIMA(pl.LightningModule):
             self.gt = gt
         else:
             self.gt = self.y_masked
+
+        self.true_post_mean = kwargs.get('true_post_mean', None)
+        self.true_post_std = kwargs.get('true_post_std', None)
 
         self.node_means = torch.tensor(np.nanmean(self.y_masked.reshape(self.T, -1), 0))
 
@@ -107,6 +110,21 @@ class NodeARIMA(pl.LightningModule):
         self.log(f"{split}_mse_smoothed", np.square(residuals_s).mean(), sync_dist=True)
         self.log(f"{split}_mape_smoothed", np.abs(rel_residuals_s).mean(), sync_dist=True)
 
+        if self.true_post_mean is not None:
+            target = self.true_post_mean.reshape(-1)[mask].detach().numpy()
+            residuals = target - x_smoothed
+            self.log(f"{split}_mae_mean_smoothed", np.abs(residuals).mean(), sync_dist=True)
+            self.log(f"{split}_rmse_mean_smoothed", np.sqrt(np.square(residuals).mean()), sync_dist=True)
+
+            self.log(f"{split}_crps_mean_smoothed", crps_score(x_smoothed, std_smoothed, target), sync_dist=True)
+            self.log(f"{split}_int_score_mean_smoothed", int_score(x_smoothed, std_smoothed, target), sync_dist=True)
+
+            if self.true_post_std is not None:
+                target_std = self.true_post_std.reshape(-1)[mask].detach().numpy()
+                residuals_std = target_std - std_smoothed
+                self.log(f"{split}_mae_std_smoothed", np.abs(residuals_std).mean(), sync_dist=True)
+                self.log(f"{split}_rmse_std_smoothed", np.sqrt(np.square(residuals_std).mean()), sync_dist=True)
+
 
     def test_step(self, test_mask, *args):
         if self.final_prediction:
@@ -165,10 +183,14 @@ class KS_EM(pl.LightningModule):
         else:
             self.gt = self.y_masked
 
+        self.true_post_mean = kwargs.get('true_post_mean', None)
+        self.true_post_std = kwargs.get('true_post_std', None)
+
         initial_mean = torch.zeros(1, self.num_nodes)
-        initial_cov = 100 * torch.eye(self.num_nodes).unsqueeze(0)
-        transition_cov = 0.1 * torch.eye(self.num_nodes).unsqueeze(0)
-        transition_model = torch.eye(self.num_nodes).unsqueeze(0)
+        initial_cov = 10 * torch.eye(self.num_nodes).unsqueeze(0)
+        #transition_cov = 3 * torch.eye(self.num_nodes).unsqueeze(0)
+        transition_cov = torch.diag(3 + torch.rand(self.num_nodes)).unsqueeze(0)
+        transition_model = 1 * torch.eye(self.num_nodes).unsqueeze(0)
         observation_models = self.all_H(train_mask)
         observation_noise = config.get('noise_std')
 
@@ -209,7 +231,7 @@ class KS_EM(pl.LightningModule):
         self.KS.update_H(observation_models)
 
         # estimate parameters with EM algorithm
-        self.KS.EM(y_masked.unsqueeze(0), n_iterations, update=['Q', 'mean'])
+        self.KS.EM(y_masked.unsqueeze(0), n_iterations, update=['alpha', 'mean', 'Q'], eps=self.config.get('EM_eps', 1e-3))
 
         # estimate states with Kalman smoother
         mean_smoothed, cov_smoothed, cov_lagged = self.KS.smoother(y_masked.unsqueeze(0))
@@ -247,6 +269,18 @@ class KS_EM(pl.LightningModule):
         self.log(f"{split}_crps", crps_score(x_smoothed_np, std_smoothed_np, targets_np), sync_dist=True)
         self.log(f"{split}_int_score", int_score(x_smoothed_np, std_smoothed_np, targets_np), sync_dist=True)
 
+        if self.true_post_mean is not None:
+            target = self.true_post_mean.reshape(-1)[mask]
+            residuals = target - x_smoothed
+            self.log(f"{split}_mae_mean", residuals.abs().mean(), sync_dist=True)
+            self.log(f"{split}_rmse_mean", torch.pow(residuals, 2).mean().sqrt(), sync_dist=True)
+
+            if self.true_post_std is not None:
+                target_std = self.true_post_std.reshape(-1)[mask]
+                residuals_std = target_std - std_smoothed
+                self.log(f"{split}_mae_std", residuals_std.abs().mean(), sync_dist=True)
+                self.log(f"{split}_rmse_std", torch.pow(residuals_std, 2).mean().sqrt(), sync_dist=True)
+
 
     def test_step(self, test_mask, *args):
         if self.final_prediction:
@@ -273,6 +307,192 @@ class KS_EM(pl.LightningModule):
             data_mask = self.train_mask
 
         results = self.forward(data_mask, n_iterations=self.config['n_iterations'])
+
+        return results
+
+
+class EnKS(pl.LightningModule):
+
+    def __init__(self, config, data, joint_mask, train_mask, transition_model, ensemble_size,
+                 initial_params=None, initial_std_params=None, T=1, gt=None, **kwargs):
+        super(EnKS, self).__init__()
+
+        self.T = T
+        self.y = data
+        self.mask = joint_mask
+        self.inv_mask = torch.logical_not(self.mask).reshape(T, -1)
+        self.num_nodes = self.inv_mask.size(1)
+        self.y_masked = torch.zeros(self.mask.size(), dtype=self.y.dtype)
+        self.y_masked[self.mask] = self.y
+
+        self.config = config
+
+        self.train_mask = train_mask
+        self.final_prediction = False # set to True for final model fitting and prediction
+
+        if gt is not None:
+            self.gt = gt
+        else:
+            self.gt = self.y_masked
+
+        self.true_post_mean = kwargs.get('true_post_mean', None)
+        self.true_post_std = kwargs.get('true_post_std', None)
+
+        # TODO: include model parameters for joint parameter and state estimation
+
+        initial_mean = torch.ones(self.num_nodes) * data.mean()
+
+        initial_std = config.get('initial_std_states', 10) * torch.ones(self.num_nodes)
+        transition_std = config.get('transition_std_states', 1.7) * torch.ones(self.num_nodes)
+
+        if initial_params is not None:
+            self.n_params = len(initial_params)
+            initial_mean = torch.cat([initial_mean, initial_params], dim=0)
+            self.y_masked = torch.cat([self.y_masked.reshape(T, -1), torch.zeros(T, self.n_params)], dim=1).flatten()
+            self.num_nodes = self.num_nodes + self.n_params
+
+            if initial_std_params is None:
+                initial_std_params = 0.1 * torch.ones(self.n_params)
+            initial_std = torch.cat([initial_std, initial_std_params])
+            transition_std = torch.cat([transition_std, config.get('transition_std_params', 1e-5) * torch.ones(self.n_params)])
+        else:
+            self.n_params = 0
+
+
+        #initial_mean = self.y_masked.reshape(T, -1)[0]
+        #initial_cov_factor = torch.sqrt(10 * torch.eye(self.num_nodes))
+        #initial_cov_factor = torch.sqrt(100 * torch.eye(self.num_nodes))
+        #initial_cov_factor[-1, -1] = 1
+        #transition_cov_factor = torch.sqrt(torch.diag(3 + torch.rand(self.num_nodes)))
+        #transition_cov_factor = torch.sqrt(3 * torch.eye(self.num_nodes))
+        #transition_cov_factor[-1, -1] = 0.0
+
+        initial_cov_factor = torch.diag(initial_std)
+        transition_cov_factor = torch.diag(transition_std)
+
+
+        observation_models = self.all_H(train_mask)
+        observation_noise = config.get('noise_std')
+
+        self.EnKS = EnsembleKalmanSmoother(ensemble_size, initial_mean, initial_cov_factor, transition_model,
+                                           transition_cov_factor, observation_models, observation_noise)
+
+
+    def all_H(self, mask):
+        # mask has shape [T * num_nodes]
+        # output is list of T tensors of shape [num_observed_nodes_t, num_nodes]
+
+        identity = torch.eye(self.num_nodes)
+        all_H = []
+
+        mask = mask.reshape(self.T, -1)
+
+        # adjust for each time step
+        for t in range(self.T):
+            # get observed nodes for time t
+            jdx = (mask[t].to(torch.float32).flatten()).nonzero().squeeze()
+
+            all_H.append(identity[jdx, :])
+            # jdx = (sub_mask[t] - 1).nonzero().squeeze()
+
+        return all_H
+
+    def forward(self, data_mask):
+
+        if self.n_params > 0:
+            data_mask = torch.cat([data_mask.reshape(self.T, -1),
+                                   torch.zeros(self.T, self.n_params, dtype=data_mask.dtype)], dim=1).flatten()
+
+        y_masked = torch.zeros_like(self.y_masked)
+        y_masked[data_mask] = self.y_masked[data_mask]
+        y_masked = y_masked.reshape(self.T, self.num_nodes)
+
+        # update observation model according to mask
+        observation_models = self.all_H(data_mask)
+        self.EnKS.update_H(observation_models)
+
+        # estimate states with Kalman smoother
+        _, _, ensemble_smoothed = self.EnKS.smoother(y_masked)
+        # _, ensemble_smoothed = self.EnKS.filter(y_masked)
+
+        cov_smoothed = self.EnKS.ensemble_cov(ensemble_smoothed)
+
+        std_smoothed = torch.diagonal(cov_smoothed, dim1=-2, dim2=-1)
+        mean_smoothed = ensemble_smoothed.mean(-1)
+
+        return {'post_mean': mean_smoothed[:, :self.num_nodes - self.n_params],
+                'post_std': std_smoothed[:, :self.num_nodes - self.n_params],
+                'post_cov': cov_smoothed[:, :self.num_nodes - self.n_params, :self.num_nodes - self.n_params],
+                'data': y_masked[:, :self.num_nodes - self.n_params],
+                'train_mask': data_mask[:self.num_nodes - self.n_params],
+                'gt': self.gt if hasattr(self, 'gt') else 'NA'}
+
+    def evaluate(self, results, mask, split='test'):
+
+        idx = mask.reshape(20, -1).sum(0).nonzero().flatten()[0]
+        jdx = torch.logical_not(mask).reshape(20, -1).sum(0).nonzero().flatten()[0]
+
+        print(results['post_mean'].reshape(20, -1)[:, idx])
+        print(self.gt.reshape(20, -1)[:, idx])
+
+        print(results['post_mean'].reshape(20, -1)[:, jdx])
+        print(self.gt.reshape(20, -1)[:, jdx])
+
+        x_smoothed = results['post_mean'].flatten()[mask]
+        std_smoothed = results['post_std'].flatten()[mask]
+
+        targets = self.gt[mask]
+        residuals = targets - x_smoothed
+
+        self.log(f"{split}_mae", residuals.abs().mean().item(), sync_dist=True)
+        self.log(f"{split}_mse", torch.pow(residuals, 2).mean().item(), sync_dist=True)
+        self.log(f"{split}_rmse", torch.pow(residuals, 2).mean().sqrt().item(), sync_dist=True)
+        self.log(f"{split}_mape", (residuals / targets).abs().mean().item(), sync_dist=True)
+
+        x_smoothed_np = x_smoothed.to('cpu').detach().numpy()
+        std_smoothed_np = std_smoothed.to('cpu').detach().numpy()
+        targets_np = targets.to('cpu').detach().numpy()
+
+        self.log(f"{split}_crps", crps_score(x_smoothed_np, std_smoothed_np, targets_np), sync_dist=True)
+        self.log(f"{split}_int_score", int_score(x_smoothed_np, std_smoothed_np, targets_np), sync_dist=True)
+
+        if self.true_post_mean is not None:
+            target = self.true_post_mean.reshape(-1)[mask]
+            residuals = target - x_smoothed
+            self.log(f"{split}_mae_mean", residuals.abs().mean(), sync_dist=True)
+            self.log(f"{split}_rmse_mean", torch.pow(residuals, 2).mean().sqrt(), sync_dist=True)
+
+            if self.true_post_std is not None:
+                target_std = self.true_post_std.reshape(-1)[mask]
+                residuals_std = target_std - std_smoothed
+                self.log(f"{split}_mae_std", residuals_std.abs().mean(), sync_dist=True)
+                self.log(f"{split}_rmse_std", torch.pow(residuals_std, 2).mean().sqrt(), sync_dist=True)
+
+
+    def test_step(self, test_mask, *args):
+        if self.final_prediction:
+            # use all data except for test data
+            data_mask = torch.logical_and(self.mask, torch.logical_not(test_mask.flatten()).to(self.mask.device))
+            split = 'test'
+        else:
+            # only use dedicated training data (neither validation nor test data)
+            data_mask = self.train_mask
+            split = 'val'
+
+        results = self.forward(data_mask)
+        self.evaluate(results, test_mask.flatten(), split=split)
+
+
+    def predict_step(self, predict_mask, *args):
+
+        if self.final_prediction:
+            # use all data except for test data
+            data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask.flatten()).to(self.mask.device))
+        else:
+            # only use dedicated training data (neither validation nor test data)
+            data_mask = self.train_mask
+
+        results = self.forward(data_mask)
 
         return results
 
