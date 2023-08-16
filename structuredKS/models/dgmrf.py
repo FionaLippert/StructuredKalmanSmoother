@@ -1314,7 +1314,7 @@ class VariationalDist(torch.nn.Module):
             out = x
 
         # multiply with diagonal matrix
-        out = self.std * x  # [T, dim] * [nbatch, T, dim]
+        out = self.std * out  # [T, dim] * [nbatch, T, dim]
 
         # multiply with \Tilde{S}
         for layer in self.layers:

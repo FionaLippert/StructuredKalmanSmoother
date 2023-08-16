@@ -19,8 +19,7 @@ command:
   - n_iterations=10000
   - cg_regularizer=10
   - +mask_width=9
-  - save_prediction=true
-  - save_transition_matrix=true
+  - save_prediction=false
 method: grid
 metric:
   name: test_rmse
@@ -28,14 +27,14 @@ metric:
 parameters:
   seed:
     #values: [8, 9]
-    values: [0, 1, 2, 3, 4]
+    values: [0, 1] #, 2, 3, 4]
   n_layers:
     values: [2]
   transition_type:
     values: ["advection+diffusion"]
   n_transitions:
-    values: [1, 2, 3, 4]
-    #values: [4]
+    #values: [1, 2, 3, 4]
+    values: [4]
   use_vi_dynamics:
     #values: [ false, true ]
     values: [true]

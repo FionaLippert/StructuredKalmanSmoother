@@ -90,13 +90,20 @@ def run_dgmrf(config: DictConfig):
     spatial_graph = dataset_dict["spatial_graph"]
     temporal_graph = dataset_dict["temporal_graph"]
 
+    print(temporal_graph.edge_attr)
+
     # make sure that edge normals have correct order
     if config['dataset'].startswith('advection') or config['dataset'].startswith('spatiotemporal'):
-        normals = torch.stack([utils_stdgmrf.get_normal(temporal_graph.pos[u], temporal_graph.pos[v],
-                                                        max=np.sqrt(len(spatial_graph)) - 1)
+        normals = torch.stack([utils.get_normal(temporal_graph.pos[u], temporal_graph.pos[v],
+                                                        max=np.sqrt(spatial_graph.num_nodes) - 1)
                                for u, v in temporal_graph.edge_index.T], dim=0)
+        print(np.sqrt(spatial_graph.num_nodes) - 1)
         spatial_graph.edge_attr = normals
         temporal_graph.edge_attr = normals
+
+        print(normals)
+        print(temporal_graph.edge_index)
+        print(temporal_graph.pos)
 
     if config.get('use_features', False) or config.get('use_features_dynamics', False):
         features = dataset_dict["covariates"].to(torch.float32)
@@ -248,11 +255,7 @@ def run_dgmrf(config: DictConfig):
         trainer.test(model, dl_test)
         if config.get('save_prediction', False): 
             results = trainer.predict(model, dl_test, return_predictions=True)
-            #results = {
-            #        'post_mean': model.post_mean.reshape(model.T, -1),
-            #        'post_std': model.post_std.reshape(model.T, -1)
-            #        }
-                else:
+    else:
         ds_val = DummyDataset(dataset_dict['val_masks'].reshape(-1), 1)
         dl_val = DataLoader(ds_val, batch_size=1, shuffle=False)
         trainer.test(model, dl_val)
