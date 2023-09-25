@@ -1,17 +1,16 @@
 #!/bin/bash
 
 #SBATCH --partition=gpu
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=4
 #SBATCH --gpus=1
-#SBATCH --job-name=train_eval
-#SBATCH --time=0:05:00
+#SBATCH --job-name=sweep_job
+#SBATCH --time=0:20:00
 #SBATCH --output=slurm_output_%A_%a.out
 #SBATCH --mail-type=BEGIN,END
 #SBATCH --mail-user=f.lippert@uva.nl
+#SBATCH --array 1-10%10
 
-# run this file as "sbatch train_eval.job "var1=val2 var2=val2"
+# run this file as "sbatch sweep_array.job sweep_id
 
 source activate stdgmrf
 
@@ -19,23 +18,16 @@ cd $HOME/StructuredKalmanSmoother/scripts
 
 which python
 
-# cp -r $HOME/StructuredKalmanSmoother/datasets/ $TMPDIR
-
 #OUTDIR=$TMPDIR/results
 #mkdir -p $OUTDIR
 
 nvidia-smi
 
-OVERRIDES=$1
-
-echo $OVERRIDES
-
 # don't sync while running on compute nodes
 #export WANDB_MODE="offline"
-#export WANDB_DIR=$TMPDIR
+export WANDB_DIR=$HOME/StructuredKalmanSmoother
 
-#srun python test_spdgmrf.py output_dir=$OUTDIR $OVERRIDES
-srun python run_stdgmrf.py $OVERRIDES
+wandb agent --count 1 $1
 
 # sync after completion
 #wandb sync --include-offline $WANDB_DIR/wandb/offline-*

@@ -1,24 +1,23 @@
 program: run_stdgmrf.py
-name: stdgmrf_sweep_diff_features
+name: dgmrf_sweep_features
 command:
   - ${env}
   - ${interpreter}
   - ${program}
   - ${args_no_hyphens}
+  - use_dynamics=false
+  - transition_type=none
+  - n_transitions=0
+  - use_vi_dynamics=false
   - learn_noise_std=false
   - noise_std=0.01
-  - use_dynamics=true
-  - use_dynamics_bias=true
-  - use_features=false
-  - use_features_dynamics=true
-  - vi_transition_type=diffusion
-  - independent_time=false
   - final=true
   - weighted_dgmrf=true
   - weighted_vi=false
   - n_iterations=10000
-  - MLP_hidden_dim=16
-  - +gradient_clip_val=0.5
+  - cg_regularizer=10
+  - lr=0.01
+  - +gradient_clip_val=0.0
 method: grid
 metric:
   name: test_rmse
@@ -27,16 +26,12 @@ parameters:
   seed:
     values: [0, 1, 2, 3, 4]
   n_layers:
+    #values: [1, 2, 3, 4]
     values: [2]
-  transition_type:
-    values: ["diffusion"]
-  n_transitions:
-    values: [0, 1, 2, 3, 4, 5, 6]
-  n_layers_temporal:
-    values: [1, 2]
-  use_vi_dynamics:
-    values: [ false, true ]
+  independent_time:
+    values: [true]
+  use_features:
+    values: [true]
   dataset:
     values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.8_tblocks=10"']
-
-
+    #values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=forecasting_0.9"']

@@ -1,4 +1,4 @@
-program: run_stdgmrf.py
+program: test_spdgmrf.py
 name: dgmrf_sweep
 command:
   - ${env}
@@ -16,19 +16,20 @@ command:
   - weighted_vi=false
   - n_iterations=10000
   - cg_regularizer=10
-  - +gradient_clip_val=0.5
+  - n_training_samples=4
 method: grid
 metric:
   name: test_rmse
   goal: minimize
 parameters:
   seed:
-    values: [0, 1, 2, 3, 4]
+    values: [0]
+    #values: [0, 1, 2, 3, 4]
   n_layers:
-    #values: [1, 2, 3, 4]
-    values: [2]
+    values: [2, 4, 6]
+    #values: [2]
   independent_time:
-    values: [false, true]
+    values: [false]
   dataset:
     #values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.8_tblocks=10"']
-    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=forecasting_0.9"']
+    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.1_tblocks=10_ndummy=24354"']

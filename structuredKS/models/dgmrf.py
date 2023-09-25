@@ -482,7 +482,7 @@ class JointDGMRF(torch.nn.Module):
             self.dgmrf = DGMRF(config, spatial_graph, T=T, shared=shared, weighted=weighted)
         self.T = T
 
-        if temporal_graph is not None:
+        if temporal_graph is not None and config.get('n_transitions', 0) > 0:
             self.dynamics = torch.nn.ModuleList([
                 TemporalDGMRF(config, spatial_graph, temporal_graph, T=T, shared=shared, features=features)
                 for _ in range(config.get('n_layers_temporal', 1))])
@@ -1037,10 +1037,11 @@ class TemporalDGMRF(torch.nn.Module):
         self.vi_layer = kwargs.get('vi_layer', False)
         if self.vi_layer:
             self.transition_type = config.get('vi_transition_type', 'identity')
+            self.n_transitions = config.get('vi_transitions', 1)
         else:
             self.transition_type = config.get('transition_type', 'identity')
+            self.n_transitions = config.get('n_transitions', 1)
 
-        self.n_transitions = config.get('n_transitions', 1)
         self.shared_dynamics = kwargs.get('shared', 'dynamics')
 
         # setup transition model
@@ -1504,6 +1505,7 @@ class SpatiotemporalInference(pl.LightningModule):
 
             shared = 'none' if config.get('independent_time', True) else 'dynamics'
             features = self.features.reshape(self.T, self.num_nodes, -1) if self.use_features_dynamics else None
+            
             self.dgmrf = JointDGMRF(config, spatial_graph, temporal_graph, T=self.T, shared=shared,
                                     weighted=config.get('weighted_dgmrf', False), features=features)
 
@@ -1748,10 +1750,14 @@ class SpatiotemporalInference(pl.LightningModule):
             self.log("train_elbo", elbo.item(), sync_dist=True)
             self.log("vi_entropy", vi_entropy.item(), sync_dist=True)
 
+        torch.cuda.empty_cache()
+
         return -1. * elbo
 
 
     def validation_step(self, val_mask, *args):
+
+        torch.cuda.empty_cache()
 
         if self.config.get('use_KS', False):
             pass
@@ -1768,6 +1774,8 @@ class SpatiotemporalInference(pl.LightningModule):
             self.log("val_rec_loss", rec_loss.item(), sync_dist=True)
 
     def test_step(self, test_mask, *args):
+
+        torch.cuda.empty_cache()
     
         if self.config.get('use_KS', False):
             self.KS_inference(test_mask.squeeze(0), split='test')
@@ -1851,11 +1859,18 @@ class SpatiotemporalInference(pl.LightningModule):
         self.log(f"{split}_crps", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
         self.log(f"{split}_int_score", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
 
+        vi_mean_np = self.vi_mean.flatten()[test_mask].cpu().numpy()
+        vi_std_np = self.vi_std.flatten()[test_mask].cpu().numpy()
+        self.log(f"{split}_crps_vi", crps_score(vi_mean_np, vi_std_np, target_np), sync_dist=True)
+
         if self.true_post_mean is not None:
             target = self.true_post_mean.reshape(-1)[test_mask]
             residuals = target - self.post_mean.squeeze(-1)[test_mask]
             self.log(f"{split}_mae_mean", residuals.abs().mean().item(), sync_dist=True)
             self.log(f"{split}_rmse_mean", torch.pow(residuals, 2).mean().sqrt().item(), sync_dist=True)
+            residuals_vi = target - self.vi_mean.flatten()[test_mask]
+            self.log(f"{split}_mae_mean_vi", residuals_vi.abs().mean().item(), sync_dist=True)
+            self.log(f"{split}_rmse_mean_vi", torch.pow(residuals_vi, 2).mean().sqrt().item(), sync_dist=True)
 
             target_np = target.cpu().numpy()
 
@@ -1868,7 +1883,9 @@ class SpatiotemporalInference(pl.LightningModule):
                 self.log(f"{split}_mae_std", residuals_std.abs().mean().item(), sync_dist=True)
                 self.log(f"{split}_rmse_std", torch.pow(residuals_std, 2).mean().sqrt().item(), sync_dist=True)
 
-
+                residuals_std_vi = target_std - self.vi_std.flatten()[test_mask]
+                self.log(f"{split}_mae_std_vi", residuals_std_vi.abs().mean().item(), sync_dist=True)
+                self.log(f"{split}_rmse_std_vi", torch.pow(residuals_std_vi, 2).mean().sqrt().item(), sync_dist=True)
 
     def predict_step(self, predict_mask, *args):
 
@@ -1900,8 +1917,9 @@ class SpatiotemporalInference(pl.LightningModule):
                                                             #preconditioner=preconditioner2)
 
         if not hasattr(self, 'cg_samples'):
+            initial_guess = self.vi_mean
             self.post_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
-                                                 data_mask, self.config, self.noise_var, self.vi_mean, features=self.features,
+                                                 data_mask, self.config, self.noise_var, initial_guess, features=self.features,
                                                  preconditioner=None)
                                                  #preconditioner=self.vi_dist)
 
@@ -2000,6 +2018,13 @@ class SpatiotemporalInference(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        #if self.config.get('use_lr_scheduler', False):
+        #    scheduler = torch.optim.lr_scheduler.ExponentialLR(
+        #            optimizer, 0.1)
+        #else:
+        #    scheduler = None
+
+        #return optimizer, scheduler
         return optimizer
 
 #
@@ -2049,17 +2074,23 @@ def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, features=None,
     n_batch = rhs.size(0)
     N = mask.numel()
 
-    if preconditioner is not None:
-        #print('apply preconditioner P^T to rhs')
-        rhs = preconditioner(rhs.view(n_batch, T, -1), transpose=True).view(n_batch, -1)
+    #if preconditioner is not None:
+    #    #print('apply preconditioner P^T to rhs')
+    #    rhs = preconditioner(rhs.view(n_batch, T, -1), transpose=True).view(n_batch, -1)
 
     # CG requires more precision for numerical stability
     rhs = rhs.to(torch.float64)
 
     if initial_guess is None:
         initial_guess = torch.zeros_like(rhs)
+    else:
+        initial_guess = initial_guess.to(torch.float64)
 
+    print(rhs.size(), initial_guess.size())
     b = rhs + regularizer * initial_guess
+
+    if noise_var is not None:
+        noise_var = noise_var.to(torch.float64)
 
     # Batch linear operator
     def Q_tilde_batched(x):
@@ -2067,9 +2098,9 @@ def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, features=None,
 
         x = x.reshape(n_batch, T, -1)
 
-        if preconditioner is not None:
-            #print('apply preconditioner P to x')
-            x = preconditioner(x, transpose=False)
+        #if preconditioner is not None:
+        #    #print('apply preconditioner P to x')
+        #    x = preconditioner(x, transpose=False)
 
         Gx = dgmrf(x, with_bias=False)
         GtGx = dgmrf(Gx, transpose=True, with_bias=False) # has shape [n_batch, T, n_nodes]
@@ -2087,9 +2118,9 @@ def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, features=None,
 
         res = res + regularizer * x # regularization
 
-        if preconditioner is not None:
-            #print('apply preconditioner P^T to GtGx')
-            res = preconditioner(res, transpose=True)
+        #if preconditioner is not None:
+        #    #print('apply preconditioner P^T to GtGx')
+        #    res = preconditioner(res, transpose=True)
 
         res = res.view(n_batch, N, 1)
 
@@ -2106,6 +2137,8 @@ def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, features=None,
             coeff_x = x[:,N:]
 
             top_res1 = Q_tilde_batched(node_x) # shape [n_batch, N, 1]
+
+            #print(masked_features.dtype, coeff_x.dtype, noise_var.dtype, node_x.dtype)
             top_res2 = (masked_features @ coeff_x) / noise_var # shape [n_batch, N, 1]
 
             bot_res1 = (masked_features.transpose(0,1) @ node_x) / noise_var # shape [n_batch, n_features, 1]
@@ -2127,18 +2160,18 @@ def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, features=None,
     res_norm = torch.linalg.norm(residuals, dim=1)
     cg_info["res_norm"] = res_norm
 
-    if config["use_features"] and features is not None:
-        solution_x = solution[:, :N]
-        solution_beta = solution[:, N:]
+    #if config["use_features"] and features is not None:
+    #    solution_x = solution[:, :N]
+    #    solution_beta = solution[:, N:]
 
-        if preconditioner is not None:
-            solution_x = preconditioner(solution_x.view(n_batch, T, -1), transpose=False).view(n_batch, -1)
+    #    if preconditioner is not None:
+    #        solution_x = preconditioner(solution_x.view(n_batch, T, -1), transpose=False).view(n_batch, -1)
 
-        solution = solution_x + features @ solution_beta
-    else:
-        if preconditioner is not None:
-            #print('apply preconditioner P to solution')
-            solution = preconditioner(solution.view(n_batch, T, -1), transpose=False).view(n_batch, -1)
+    #    solution = solution_x + features.to(torch.float64) @ solution_beta
+    #else:
+    #    if preconditioner is not None:
+    #        #print('apply preconditioner P to solution')
+    #        solution = preconditioner(solution.view(n_batch, T, -1), transpose=False).view(n_batch, -1)
 
     if verbose:
         print("CG finished in {} iterations, solution optimal: {}".format(
@@ -2225,6 +2258,11 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, initial_gu
         # samples, cg_info = cg_solve(rhs_sample, dgmrf, mask, data.size(1), config,
         #                             noise_var=noise_var, verbose=False, return_info=True, features=features,
         #                             preconditioner=preconditioner)
+        cg_features = features
+        if initial_guess.size(-1) < rhs_sample.size(-1):
+            initial_guess = torch.cat([initial_guess, torch.zeros(1, n_features)], dim=1)
+    else:
+        cg_features = None
 
     initial_guess = initial_guess.repeat(n_samples, 1).reshape(rhs_sample.size())
     res_norm = torch.ones(data.size(0)) * float("inf")
@@ -2235,7 +2273,7 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, initial_gu
     while (res_norm > config.get('outer_rtol', 1e-7) * rhs_norm).any() and (k < config.get('max_outer_iter', 100)):
         samples, cg_info = cg_solve(rhs_sample, dgmrf, mask, data.size(1), config,
                                       noise_var=noise_var, verbose=False, return_info=True,
-                                      initial_guess=initial_guess, features=features,
+                                      initial_guess=initial_guess, features=cg_features,
                                       preconditioner=preconditioner, regularizer=regularizer)
 
         k = k + 1
@@ -2246,6 +2284,14 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, initial_gu
         regularizer = 0.1 * regularizer
 
     cg_info["niter"] = cg_niter
+
+    if config["use_features"] and features is not None:
+        samples_x = samples[:, :mask.numel()]
+        samples_beta = samples[:, mask.numel():]
+
+        print(samples_x.size(), features.size(), samples_beta.size())
+
+        samples = samples_x + features @ samples_beta
 
     if return_info:
         return samples, cg_info
@@ -2293,39 +2339,54 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess, verbose=
         mean_rhs = torch.cat([mean_rhs, rhs_append.view(1, -1).repeat(mean_rhs.size(0), 1)],
                              dim=1)  # shape [n_batch, T * num_nodes + n_features]
 
-        # run CG iterations
-        initial_guess = torch.zeros(*mean_rhs.size(), 1)
+        if initial_guess.size(-1) < mean_rhs.size(-1):
+            initial_guess = torch.cat([initial_guess, torch.zeros(1, features.size(-1))], dim=1)
+        cg_features = features
+        #res_norm = torch.ones(data.size(0)) * float("inf")
+        #rhs_norm = torch.linalg.norm(mean_rhs, dim=1)
+        #k = 0
+        #cg_niter = 0
+        #regularizer = config.get('cg_regularizer', 0)
+        
+        #post_mean, cg_info = cg_solve(mean_rhs, dgmrf, mask, data.size(1), config,
+        #                              noise_var=noise_var, verbose=verbose, return_info=True, features=features,
+        #                              initial_guess=initial_guess,
+        #                              preconditioner=preconditioner)
 
-        post_mean, cg_info = cg_solve(mean_rhs, dgmrf, mask, data.size(1), config,
-                                      noise_var=noise_var, verbose=verbose, return_info=True, features=features,
-                                      initial_guess=initial_guess,
-                                      preconditioner=preconditioner)
-
-        post_mean = post_mean[0]
+        #post_mean = post_mean[0]
     else:
-        # run CG iterations
-        initial_guess = initial_guess.reshape(mean_rhs.size())
-        res_norm = torch.ones(data.size(0)) * float("inf")
-        rhs_norm = torch.linalg.norm(mean_rhs, dim=1)
-        k = 0
-        cg_niter = 0
-        regularizer = config.get('cg_regularizer', 0)
-        while (res_norm > config.get('outer_rtol', 1e-7) * rhs_norm).any() and (k < config.get('max_outer_iter', 100)):
-            post_mean, cg_info = cg_solve(mean_rhs, dgmrf, mask, data.size(1), config,
-                                          noise_var=noise_var, verbose=verbose, return_info=True,
-                                          initial_guess=initial_guess,
-                                          preconditioner=preconditioner, regularizer=regularizer)
+        cg_features = None
+    
+    initial_guess = initial_guess.reshape(mean_rhs.size())
+    
+    res_norm = torch.ones(data.size(0)) * float("inf")
+    rhs_norm = torch.linalg.norm(mean_rhs, dim=1)
+    k = 0
+    cg_niter = 0
+    regularizer = config.get('cg_regularizer', 0)
+    
+    while (res_norm > config.get('outer_rtol', 1e-7) * rhs_norm).any() and (k < config.get('max_outer_iter', 100)):
+        post_mean, cg_info = cg_solve(mean_rhs, dgmrf, mask, data.size(1), config,
+                                      noise_var=noise_var, verbose=verbose, return_info=True,
+                                      initial_guess=initial_guess, features=cg_features,
+                                      preconditioner=preconditioner, regularizer=regularizer)
 
-            k = k + 1
-            cg_niter += cg_info["niter"]
-            res_norm = cg_info["res_norm"]
-            print(f'relative residual norm after outer iteration {k} = {res_norm / rhs_norm}')
-            initial_guess = post_mean.squeeze(-1)
-            regularizer = 0.1 * regularizer
+        k = k + 1
+        cg_niter += cg_info["niter"]
+        res_norm = cg_info["res_norm"]
+        print(f'relative residual norm after outer iteration {k} = {res_norm / rhs_norm}')
+        initial_guess = post_mean.squeeze(-1)
+        regularizer = 0.1 * regularizer
 
-        post_mean = post_mean[0]
-        cg_info["niter"] = cg_niter
+    post_mean = post_mean[0]
+    cg_info["niter"] = cg_niter
 
+    if config["use_features"] and features is not None:
+        post_mean_x = post_mean[:mask.numel()]
+        post_mean_beta = post_mean[mask.numel():]
+
+        post_mean = post_mean_x + features @ post_mean_beta
+    
     if return_info:
         return post_mean, cg_info
     else:
@@ -2359,6 +2420,7 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess, fea
         niter_list.append(cg_info["niter"])
 
     posterior_samples = torch.cat(posterior_samples_list, dim=0)[:config["n_post_samples"]]
+
 
     # MC estimate of variance using known population mean
     post_var_x = torch.mean(torch.pow(posterior_samples - post_mean, 2), dim=0)
