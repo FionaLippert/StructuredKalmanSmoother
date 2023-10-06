@@ -90,7 +90,7 @@ def run_dgmrf(config: DictConfig):
     spatial_graph = dataset_dict["spatial_graph"]
     temporal_graph = dataset_dict["temporal_graph"]
 
-    print(temporal_graph.edge_attr)
+    #print(temporal_graph.edge_attr)
 
     # make sure that edge normals have correct order
     if config['dataset'].startswith('advection') or config['dataset'].startswith('spatiotemporal'):
@@ -101,9 +101,9 @@ def run_dgmrf(config: DictConfig):
         spatial_graph.edge_attr = normals
         temporal_graph.edge_attr = normals
 
-        print(normals)
-        print(temporal_graph.edge_index)
-        print(temporal_graph.pos)
+        #print(normals)
+        #print(temporal_graph.edge_index)
+        #print(temporal_graph.pos)
 
     if config.get('use_features', False) or config.get('use_features_dynamics', False):
         features = dataset_dict["covariates"].to(torch.float32)
@@ -140,7 +140,7 @@ def run_dgmrf(config: DictConfig):
     N = masks.numel()
     T = masks.size(0)
 
-    print(f'initial guess = {data.mean()}')
+    #print(f'initial guess = {data.mean()}')
     initial_guess = torch.ones(N) * data.mean()
 
     model = SpatiotemporalInference(config, initial_guess, data, joint_mask,
@@ -153,8 +153,8 @@ def run_dgmrf(config: DictConfig):
                                     true_post_std=dataset_dict.get("true_posterior_std", None))
 
 
-    for param_name, param_value in model.dgmrf.state_dict().items():
-        print("{}: {}".format(param_name, param_value))
+    #for param_name, param_value in model.dgmrf.state_dict().items():
+    #    print("{}: {}".format(param_name, param_value))
 
 
     wandb_logger = WandbLogger() #log_model='all')
@@ -168,15 +168,15 @@ def run_dgmrf(config: DictConfig):
 
         gt = dataset_dict["gt"]
         residuals = (gt - true_mean)
-        print(residuals.max(), residuals.min())
-        print(residuals[test_mask].max(), residuals[test_mask].min())
+        #print(residuals.max(), residuals.min())
+        #print(residuals[test_mask].max(), residuals[test_mask].min())
 
         wandb.run.summary["test_mae_optimal"] = residuals[test_mask].abs().mean().item()
         wandb.run.summary["test_rmse_optimal"] = torch.pow(residuals[test_mask], 2).mean().sqrt().item()
         wandb.run.summary["test_mape_optimal"] = (residuals[test_mask] / gt[test_mask]).abs().mean().item()
 
-        inference_callback = LatticeInferenceCallback(wandb_logger, config, dataset_dict['grid_size'],
-                                                      true_mean, true_std, residuals)
+        #inference_callback = LatticeInferenceCallback(wandb_logger, config, dataset_dict['grid_size'],
+        #                                              true_mean, true_std, residuals)
     else:
         tidx = T // 2
 
@@ -215,16 +215,17 @@ def run_dgmrf(config: DictConfig):
         # val_nodes = val_nodes[torch.randperm(val_nodes.numel())[:5]]
         # test_nodes = test_nodes[torch.randperm(test_nodes.numel())[:5]]
 
-        inference_callback = GraphInferenceCallback(wandb_logger, config, temporal_graph, tidx,
-                                        test_nodes.cpu(), val_nodes.cpu())#, subset=subset, mark_subset=mark_subset)
+        #inference_callback = GraphInferenceCallback(wandb_logger, config, temporal_graph, tidx,
+        #                                test_nodes.cpu(), val_nodes.cpu())#, subset=subset, mark_subset=mark_subset)
 
-    earlystopping_callback = EarlyStopping(monitor="val_rec_loss", mode="min", patience=config["early_stopping_patience"])
+    #earlystopping_callback = EarlyStopping(monitor="val_rec_loss", mode="min", patience=config["early_stopping_patience"])
 
 
-    if config.get('use_KS', False):
-        callbacks = []
-    else:
-        callbacks = [inference_callback, earlystopping_callback]
+    #if config.get('use_KS', False):
+    #    callbacks = []
+    #else:
+    #    callbacks = [inference_callback, earlystopping_callback]
+    callbacks = []
 
     trainer = pl.Trainer(
         max_epochs=int(config["n_iterations"] / config["val_interval"]),
@@ -234,10 +235,8 @@ def run_dgmrf(config: DictConfig):
         accelerator='gpu',
         devices=1,
         callbacks=callbacks,
-        gradient_clip_val=config.get('gradient_clip_val', 1.0)
+        gradient_clip_val=config.get('gradient_clip_val', 0.0)
     )
-
-    print('gradients are clipped to', config.get('gradient_clip_val', 1.0))
 
 
     if 'wandb_run' in config:

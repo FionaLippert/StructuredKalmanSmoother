@@ -1,4 +1,4 @@
-program: test_spdgmrf.py
+program: run_stdgmrf.py
 name: spatiotemporal_sweep_dynamic_GNN
 command:
   - ${env}

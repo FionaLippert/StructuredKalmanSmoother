@@ -1,5 +1,5 @@
 program: run_stdgmrf.py
-name: stdgmrf_sweep_diff_features
+name: stdgmrf_sweep_diff
 command:
   - ${env}
   - ${interpreter}
@@ -10,14 +10,13 @@ command:
   - use_dynamics=true
   - use_dynamics_bias=true
   - use_features=false
-  - use_features_dynamics=true
+  - use_features_dynamics=false
   - vi_transition_type=diffusion
   - independent_time=false
   - final=true
   - weighted_dgmrf=true
   - weighted_vi=false
   - n_iterations=10000
-  - MLP_hidden_dim=16
   - +gradient_clip_val=0.5
 method: grid
 metric:
@@ -31,7 +30,7 @@ parameters:
   transition_type:
     values: ["diffusion"]
   n_transitions:
-    values: [0, 1, 2, 3, 4, 5, 6]
+    values: [1, 2, 3, 4]
   n_layers_temporal:
     values: [1, 2]
   use_vi_dynamics:
