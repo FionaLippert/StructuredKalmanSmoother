@@ -237,7 +237,9 @@ def run_dgmrf(config: DictConfig):
         callbacks=callbacks,
         gradient_clip_val=config.get('gradient_clip_val', 0.0)
     )
-
+    
+    for param_name, param_value in model.vi_dist.dynamics.state_dict().items():
+        print(f'{param_name}: {param_value}')
 
     if 'wandb_run' in config:
         # load pre-trained model
