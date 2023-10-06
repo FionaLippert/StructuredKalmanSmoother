@@ -190,6 +190,7 @@ class KS_EM(pl.LightningModule):
         initial_cov = 10 * torch.eye(self.num_nodes).unsqueeze(0)
         #transition_cov = 3 * torch.eye(self.num_nodes).unsqueeze(0)
         transition_cov = torch.diag(3 + torch.rand(self.num_nodes)).unsqueeze(0)
+        transition_cov = torch.diag(5 + torch.rand(self.num_nodes)).unsqueeze(0)
         transition_model = 1 * torch.eye(self.num_nodes).unsqueeze(0)
         observation_models = self.all_H(train_mask)
         observation_noise = config.get('noise_std')
@@ -231,7 +232,7 @@ class KS_EM(pl.LightningModule):
         self.KS.update_H(observation_models)
 
         # estimate parameters with EM algorithm
-        self.KS.EM(y_masked.unsqueeze(0), n_iterations, update=['alpha', 'mean', 'Q'], eps=self.config.get('EM_eps', 1e-3))
+        self.KS.EM(y_masked.unsqueeze(0), n_iterations, update=['mean', 'alpha', 'Q'], eps=self.config.get('EM_eps', 1e-3))
 
         # estimate states with Kalman smoother
         mean_smoothed, cov_smoothed, cov_lagged = self.KS.smoother(y_masked.unsqueeze(0))

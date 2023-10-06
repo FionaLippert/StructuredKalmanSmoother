@@ -26,9 +26,6 @@ from structuredKS import utils
 from structuredKS.datasets.dummy_dataset import DummyDataset
 from callbacks import *
 
-def seed_all(seed):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
 
 def print_params(model, config, header=None):
     if header:
@@ -46,12 +43,6 @@ def print_params(model, config, header=None):
         if hasattr(layer, "degree_power"):
             print("degree power: {:.4}".format(layer.degree_power[0].item()))
 
-def get_model(run_path):
-    api = wandb.Api()
-    artifact = api.artifact(run_path, type='models')
-    model_path = osp.join(artifact.download(), 'model.pt')
-
-    return model_path
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
@@ -60,8 +51,21 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 def run_dgmrf(config: DictConfig):
 
     print(f'hydra working dir: {os.getcwd()}')
+
+    if 'wandb_run' in config:
+        # load config of pre-trained model
+        model_path, full_config = utils.get_wandb_model(config['wandb_run'], return_config=True)
+
+        wandb_config = eval(full_config['config'].replace("'", '"'))
+        wandb_config['data_dir'] = config.data_dir
+        wandb_config['output_dir'] = config.output_dir
+        wandb_config['wandb_run'] = config.wandb_run
+
+        config = wandb_config
+
     print(config)
-    seed_all(config['seed'])
+
+    utils.seed_all(config['seed'])
 
     if not config['device'] == "cpu" and torch.cuda.is_available():
         print('Use GPU')
@@ -87,70 +91,73 @@ def run_dgmrf(config: DictConfig):
     print('load data')
 
     dataset_dict = utils.load_dataset(config["dataset"], config["data_dir"], device=device)
-    spatial_graph = dataset_dict["spatial_graph"]
-    temporal_graph = dataset_dict["temporal_graph"]
+
+    # initialize model based on given config
+    model = setup_model(config, device)
+
+    # spatial_graph = dataset_dict["spatial_graph"]
+    # temporal_graph = dataset_dict["temporal_graph"]
 
     #print(temporal_graph.edge_attr)
 
-    # make sure that edge normals have correct order
-    if config['dataset'].startswith('advection') or config['dataset'].startswith('spatiotemporal'):
-        normals = torch.stack([utils.get_normal(temporal_graph.pos[u], temporal_graph.pos[v],
-                                                        max=np.sqrt(spatial_graph.num_nodes) - 1)
-                               for u, v in temporal_graph.edge_index.T], dim=0)
+    # # make sure that edge normals have correct order
+    # if config['dataset'].startswith('advection') or config['dataset'].startswith('spatiotemporal'):
+    #     normals = torch.stack([utils.get_normal(temporal_graph.pos[u], temporal_graph.pos[v],
+    #                                                     max=np.sqrt(spatial_graph.num_nodes) - 1)
+    #                            for u, v in temporal_graph.edge_index.T], dim=0)
+    #
+    #     spatial_graph.edge_attr = normals
+    #     temporal_graph.edge_attr = normals
+    #
+    #     #print(normals)
+    #     #print(temporal_graph.edge_index)
+    #     #print(temporal_graph.pos)
+    #
+    # if config.get('use_features', False) or config.get('use_features_dynamics', False):
+    #     features = dataset_dict["covariates"].to(torch.float32)
+    #     features = features - features.mean(0)
+    #     print('features std min', features.std(0).min())
+    #     features = features / features.std(0)
+    #     features = features[:, [0, 3, 4]]
+    #     print(f'use {features.size(1)} features')
+    #     print(features.min(), features.max())
+    # else:
+    #     features = None
 
-        spatial_graph.edge_attr = normals
-        temporal_graph.edge_attr = normals
+    # data = dataset_dict["data"].to(torch.float32)
+    # masks = dataset_dict["masks"] # shape [T, num_nodes]
+    # joint_mask = masks.reshape(-1)
 
-        #print(normals)
-        #print(temporal_graph.edge_index)
-        #print(temporal_graph.pos)
+    # val_nodes = dataset_dict["val_masks"].sum(0).nonzero().squeeze()
+    # val_nodes = val_nodes[torch.randperm(val_nodes.numel())[:5]]
+    #
+    # if not config.get('final', False):
+    #     # exclude all test data for training and validation runs
+    #     trainval_mask = torch.logical_not(dataset_dict["test_masks"].reshape(-1))
+    #     data = data[trainval_mask[joint_mask]]
+    #     joint_mask = torch.logical_and(joint_mask, trainval_mask)
+    #
+    #     # don't use test set yet
+    #     test_nodes = val_nodes
+    # else:
+    #     test_nodes = dataset_dict["test_masks"].sum(0).nonzero().squeeze()
+    #     test_nodes = test_nodes[torch.randperm(test_nodes.numel())[:5]]
 
-    if config.get('use_features', False) or config.get('use_features_dynamics', False):
-        features = dataset_dict["covariates"].to(torch.float32)
-        features = features - features.mean(0)
-        print('features std min', features.std(0).min())
-        features = features / features.std(0)
-        features = features[:, [0, 3, 4]]
-        print(f'use {features.size(1)} features')
-        print(features.min(), features.max())
-    else:
-        features = None
-
-    data = dataset_dict["data"].to(torch.float32)
-    masks = dataset_dict["masks"] # shape [T, num_nodes]
-    joint_mask = masks.reshape(-1)
-
-    val_nodes = dataset_dict["val_masks"].sum(0).nonzero().squeeze()
-    # val_nodes = val_nodes[~torch.isin(val_nodes, test_nodes)]
-    val_nodes = val_nodes[torch.randperm(val_nodes.numel())[:5]]
-
-    if not config.get('final', False):
-        # exclude all test data for training and validation runs
-        trainval_mask = torch.logical_not(dataset_dict["test_masks"].reshape(-1))
-        data = data[trainval_mask[joint_mask]]
-        joint_mask = torch.logical_and(joint_mask, trainval_mask)
-
-        # don't use test set yet
-        test_nodes = val_nodes
-    else:
-        test_nodes = dataset_dict["test_masks"].sum(0).nonzero().squeeze()
-        test_nodes = test_nodes[torch.randperm(test_nodes.numel())[:5]]
-
-    M = data.numel()
-    N = masks.numel()
-    T = masks.size(0)
-
-    #print(f'initial guess = {data.mean()}')
-    initial_guess = torch.ones(N) * data.mean()
-
-    model = SpatiotemporalInference(config, initial_guess, data, joint_mask,
-                                    spatial_graph.to_dict(), temporal_graph.to_dict(),
-                                    T=T, gt=dataset_dict.get('gt', None),
-                                    data_mean=dataset_dict.get('data_mean', 0),
-                                    data_std=dataset_dict.get('data_std', 1),
-                                    features=features,
-                                    true_post_mean=dataset_dict.get("true_posterior_mean", None),
-                                    true_post_std=dataset_dict.get("true_posterior_std", None))
+    # M = data.numel()
+    # N = masks.numel()
+    # T = masks.size(0)
+    #
+    # #print(f'initial guess = {data.mean()}')
+    # initial_guess = torch.ones(N) * data.mean()
+    #
+    # model = SpatiotemporalInference(config, initial_guess, data, joint_mask,
+    #                                 spatial_graph.to_dict(), temporal_graph.to_dict(),
+    #                                 T=T, gt=dataset_dict.get('gt', None),
+    #                                 data_mean=dataset_dict.get('data_mean', 0),
+    #                                 data_std=dataset_dict.get('data_std', 1),
+    #                                 features=features,
+    #                                 true_post_mean=dataset_dict.get("true_posterior_mean", None),
+    #                                 true_post_std=dataset_dict.get("true_posterior_std", None))
 
 
     #for param_name, param_value in model.dgmrf.state_dict().items():
@@ -163,13 +170,10 @@ def run_dgmrf(config: DictConfig):
     if ("true_posterior_mean" in dataset_dict) and ("gt" in dataset_dict):
 
         true_mean = dataset_dict["true_posterior_mean"].squeeze()
-        true_std = dataset_dict["true_posterior_std"].squeeze()
         test_mask = torch.logical_not(joint_mask)
 
         gt = dataset_dict["gt"]
         residuals = (gt - true_mean)
-        #print(residuals.max(), residuals.min())
-        #print(residuals[test_mask].max(), residuals[test_mask].min())
 
         wandb.run.summary["test_mae_optimal"] = residuals[test_mask].abs().mean().item()
         wandb.run.summary["test_rmse_optimal"] = torch.pow(residuals[test_mask], 2).mean().sqrt().item()
@@ -177,8 +181,8 @@ def run_dgmrf(config: DictConfig):
 
         #inference_callback = LatticeInferenceCallback(wandb_logger, config, dataset_dict['grid_size'],
         #                                              true_mean, true_std, residuals)
-    else:
-        tidx = T // 2
+    # else:
+    #     tidx = T // 2
 
         # val_nodes = dataset_dict['val_nodes'].cpu()
         # ridx = torch.randperm(len(val_nodes))[:4]
@@ -243,7 +247,7 @@ def run_dgmrf(config: DictConfig):
 
     if 'wandb_run' in config:
         # load pre-trained model
-        model_path = get_model(config.get('wandb_run'))
+        model_path = utils.get_wandb_model(config.get('wandb_run'))
         model.load_state_dict(torch.load(model_path))
     else:
         # train model
@@ -268,12 +272,8 @@ def run_dgmrf(config: DictConfig):
 
     for param_name, param_value in model.dgmrf.state_dict().items():
         print("{}: {}".format(param_name, param_value))
-    # if hasattr(model.dgmrf, 'dgmrf'):
-    #     print_params(model.dgmrf.dgmrf, config)
-    # else:
-    #     print_params(model.dgmrf, config)
-    print(f'noise var = {model.noise_var}')
 
+    print(f'noise var = {model.noise_var}')
 
     ckpt_dir = osp.join(config['output_dir'], "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)

@@ -38,8 +38,8 @@ def get_model(run_path):
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
-@hydra.main(config_path="conf", config_name="config")
-def run_baselines(config: DictConfig):
+@hydra.main(config_path="conf", config_name="config_MLP")
+def run_MLP(config: DictConfig):
 
     print(f'hydra working dir: {os.getcwd()}')
 
@@ -151,4 +151,4 @@ def run_baselines(config: DictConfig):
 
 
 if __name__ == "__main__":
-    run_baselines()
+    run_MLP()

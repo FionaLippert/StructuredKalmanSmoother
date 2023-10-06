@@ -35,19 +35,21 @@ class KalmanSmoother:
     def EM(self, data, iterations, update=['alpha', 'F', 'Q', 'R', 'mu', 'Sigma'], eps=1e-3):
 
         T = data.shape[1]
-
-        mean, cov, cov_lagged = self.smoother(data)
         i = 0
         delta = float("inf")
+
+        mean, cov, cov_lagged = self.smoother(data)
 
         while i < iterations and delta > eps:
             print(f'iteration {i}')
             # E-step
             #print(f'Q = {self.Q}')
+
             old_mean = mean
             delta_old = delta
 
             for var in update:
+
                 assert not torch.isnan(cov_lagged).any()
                 assert not torch.isnan(cov).any()
                 assert not torch.isnan(mean).any()
@@ -67,6 +69,10 @@ class KalmanSmoother:
 
                 # error = data - (self.H.unsqueeze(1) @ mean.unsqueeze(-1)).squeeze() # (batch, time, state)
 
+                old_F = self.F
+                old_Q = self.Q
+                old_mu0 = self.initial_mean
+
 
                 if var == 'alpha':
                     traceA = torch.diagonal(A, dim1=-1, dim2=-2).sum(-1)
@@ -74,19 +80,18 @@ class KalmanSmoother:
                     alpha = traceA / traceB
                     
                     self.F = alpha.reshape(-1, 1, 1) * torch.eye(self.state_dim).unsqueeze(0).repeat(self.batch_dim, 1, 1)
-                    print(f'alpha = {alpha}')
                 elif var == 'F':
                     B_inv = torch.inverse(B)
                     self.F = A @ B_inv
 
                     # if 'Q' in update:
                     #     self.Q = (C - A @ B_inv @ A.transpose(1, 2)) / (T - 1)
-                if var == 'Q':
+                elif var == 'Q':
                     self.Q = (C - self.F @ A - A @ self.F.transpose(1, 2) + self.F @ B @ self.F.transpose(1, 2)) / (T - 1)
                     assert not torch.isnan(self.Q).any()
                 # if 'R' in update: self.R = (error.unsqueeze(-1) @ error.unsqueeze(2) +
                 #           self.H.unsqueeze(1) @ cov @ self.H.transpose(1, 2).unsqueeze(1)).mean(1)
-                if var == 'mean': self.initial_mean = mean[:, 0]
+                elif var == 'mean': self.initial_mean = mean[:, 0]
 
 
                 mean, cov, cov_lagged = self.smoother(data)
@@ -94,7 +99,12 @@ class KalmanSmoother:
             delta = torch.pow(mean - old_mean, 2).mean()
             print(f'delta = {delta}')
 
-            if delta > delta_old: break
+            if delta > delta_old:
+                # recover previous parameter settings
+                self.F = old_F
+                self.Q = old_Q
+                self.initial_mean = old_mu0
+                break
 
 
             i = i + 1

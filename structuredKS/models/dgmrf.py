@@ -8,7 +8,7 @@ from structuredKS import cg_batch
 import pytorch_lightning as pl
 from timeit import default_timer as timer
 
-from structuredKS.utils import crps_score, int_score
+from structuredKS import utils
 from structuredKS.models.KS import KalmanSmoother
 
 
@@ -111,10 +111,6 @@ class DGMRFLayer(ptg.nn.MessagePassing):
         # Second parameter is (alpha2 / alpha1)
         return self.self_weight * torch.tanh(self.alpha2_param)
 
-    # def weight_self_representation(self, x):
-    #     # Representation of same node weighted with degree (taken to power)
-    #     return (x.view(-1, self.num_nodes) * torch.exp(
-    #         self.degree_power * self.log_degrees)).view(-1, 1)
 
     def weight_self_representation(self, x):
         # Representation of same node weighted with degree (taken to power)
@@ -489,19 +485,29 @@ class JointDGMRF(torch.nn.Module):
 
     def forward(self, x, transpose=False, with_bias=True, **kwargs):
         # x has shape [num_samples, T, num_nodes]
+
+        if not transpose:
+            x = self.apply_temporal(x, transpose=False, with_bias=with_bias)
+
+        x = self.apply_spatial(x, transpose=transpose, with_bias=with_bias)
+
+        if transpose:
+            x = self.apply_temporal(x, transpose=True, with_bias=with_bias)
+
+        return x
+
+    def apply_temporal(self, x, transpose=False, with_bias=True):
         out = x
-        if hasattr(self, 'dynamics') and not transpose:
+        if hasattr(self, 'dynamics'):
+            # apply temporal layers
             for p, layer in enumerate(self.dynamics):
-                out = out - layer(x, with_bias=with_bias, p=p+1) #v=kwargs.get('v', None))
+                out = out - layer(x, transpose=transpose, with_bias=with_bias, p=p+1)
 
-        z = self.dgmrf(out, transpose=transpose, with_bias=with_bias)
+        return out
 
-        out = z
-
-        if hasattr(self, 'dynamics') and transpose:
-            # for layer in reversed(self.dynamics):
-            for p, layer in enumerate(self.dynamics):
-                out = out - layer(z, transpose=True, with_bias=with_bias, p=p+1) #v=kwargs.get('v', None))
+    def apply_spatial(self, x, transpose=False, with_bias=True):
+        # apply spatial layers
+        out = self.dgmrf(x, transpose=transpose, with_bias=with_bias)
 
         return out
 
@@ -513,10 +519,10 @@ class JointDGMRF(torch.nn.Module):
 
         return self.dgmrf.get_inv_matrices()
 
-    def get_transition_matrix(self, p=1):
+    def get_transition_matrix(self, p=1, t_start=0, t_end=-1):
         assert len(self.dynamics) >= p
 
-        return self.dynamics[p-1].get_matrix()
+        return self.dynamics[p-1].get_matrix(t_start=t_start, t_end=t_end)
 
     def log_det(self):
         return self.dgmrf.log_det()
@@ -1096,18 +1102,21 @@ class TemporalDGMRF(torch.nn.Module):
         else:
             return self.bias_param
 
-    def forward(self, x, transpose=False, with_bias=True, p=1, **kwargs):
+    def forward(self, x, features=None, transpose=False, with_bias=True, p=1, **kwargs):
         # computes e=Fx
         # x has shape [n_samples, T, num_nodes]
         # p is the auto-regressive order
 
+        if features is None:
+            features = self.features
+
         if transpose:
             states = x[:, p:]
-            features = self.features[p:] if self.use_features else None
+            features = features[p:] if self.use_features else None
             layers = reversed(self.transition_models)
         else:
             states = x[:, :-p]
-            features = self.features[:-p] if self.use_features else None
+            features = features[:-p] if self.use_features else None
             layers = self.transition_models
 
         if with_bias:
@@ -1140,14 +1149,16 @@ class TemporalDGMRF(torch.nn.Module):
 
         return states
 
-    def get_matrix(self, dtype=torch.float32):
+    def get_matrix(self, t_start=0, t_end=-1, dtype=torch.float32):
         # F_t = self.forward(torch.eye(num_nodes).reshape(1, 1, num_nodes, num_nodes), transpose=True, with_bias=False)
         if self.use_features:
-            T = self.features.size(0)
+            features = self.features[t_start:t_end]
+            T = features.size(0)
         else:
             T = 2
+            features = None
         F_t = self.forward(torch.eye(self.num_nodes).reshape(self.num_nodes, 1, self.num_nodes).repeat(1, T, 1),
-                transpose=True, with_bias=False, p=1)[:, :-1, :].squeeze()
+                features=features, transpose=True, with_bias=False, p=1)[:, :-1, :].squeeze()
 
         return F_t.to(dtype)
 
@@ -1456,7 +1467,7 @@ class SpatiotemporalInference(pl.LightningModule):
 
     def __init__(self, config, initial_guess, data, joint_mask, spatial_graph, temporal_graph=None,
                  T=1, gt=None, features=None, **kwargs):
-        #def __init__(self, graphs, initial_guess, config):
+
         super(SpatiotemporalInference, self).__init__()
         self.save_hyperparameters()
 
@@ -1505,7 +1516,7 @@ class SpatiotemporalInference(pl.LightningModule):
 
             shared = 'none' if config.get('independent_time', True) else 'dynamics'
             features = self.features.reshape(self.T, self.num_nodes, -1) if self.use_features_dynamics else None
-            
+
             self.dgmrf = JointDGMRF(config, spatial_graph, temporal_graph, T=self.T, shared=shared,
                                     weighted=config.get('weighted_dgmrf', False), features=features)
 
@@ -1607,9 +1618,8 @@ class SpatiotemporalInference(pl.LightningModule):
         # x has shape [n_samples, T * n_nodes]
         # y_hat = self.obs_model(x)
         # residuals = self.y[index] - y_hat[:, index]
-        residuals = self.y_masked[..., mask] - x[..., mask]
         # rec_loss = torch.mean(torch.pow(residuals, 2))
-        rec_loss = torch.sum(torch.pow(residuals, 2))
+        rec_loss = torch.sum(torch.pow(self.y_masked[..., mask] - x[..., mask], 2))
 
         return rec_loss
 
@@ -1796,37 +1806,6 @@ class SpatiotemporalInference(pl.LightningModule):
         # y_masked[data_mask] = self.y_masked[data_mask]
         y_masked = self.y_masked * data_mask
 
-        # def preconditioner(x, transpose=False):
-        #     # x has shape [nbatch, T, n_nodes]
-        #
-        #     #diag = 1 + torch.rand(1, 1, x.size(-1))
-        #     diag = torch.ones(1, 1, x.size(-1)) * 0.2
-        #
-        #     return x * diag
-        #
-        # def preconditioner2(x, transpose=False):
-        #     input = torch.eye(self.num_nodes).unsqueeze(1).repeat(1, self.T, 1) # shape [n_nodes, T, n_nodes]
-        #
-        #     Gx = self.dgmrf(input, with_bias=False)
-        #
-        #     #print(f'Gx min = {Gx.min()}, max = {Gx.max()}')
-        #     GtGx = self.dgmrf(Gx, transpose=True, with_bias=False)  # has shape [n_nodes, T, n_nodes]
-        #
-        #     #print(f'GtGx min = {GtGx.min()}, max = {GtGx.max()}')
-        #     if self.noise_var is not None:
-        #         out = GtGx + (data_mask.to(torch.float64) / self.noise_var).view(1, self.T, -1) * input
-        #     else:
-        #         out = GtGx
-        #
-        #     #print(f'out min = {out.min()}, max = {out.max()}')
-        #
-        #     diag = torch.diagonal(out, dim1=0, dim2=2)
-        #     #print(diag.min(), diag.max())
-        #
-        #     return x / diag.view(1, self.T, self.num_nodes).sqrt()
-
-
-
         self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                         data_mask, self.config, self.noise_var, self.vi_mean,
                                                         features=self.features, verbose=False,
@@ -1856,8 +1835,14 @@ class SpatiotemporalInference(pl.LightningModule):
         pred_std_np = self.post_std.squeeze(-1)[test_mask].cpu().numpy()
         target_np = target.cpu().numpy()
 
-        self.log(f"{split}_crps", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
-        self.log(f"{split}_int_score", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_crps", utils.crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_int_score", utils.int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+
+        vi_mean_np = self.vi_mean.flatten()[test_mask].cpu().numpy()
+        vi_std_np = self.vi_std.flatten()[test_mask].cpu().numpy()
+
+        self.log(f"{split}_crps_vi", utils.crps_score(vi_mean_np, vi_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_int_score_vi", utils.int_score(vi_mean_np, vi_std_np, target_np), sync_dist=True)
 
         vi_mean_np = self.vi_mean.flatten()[test_mask].cpu().numpy()
         vi_std_np = self.vi_std.flatten()[test_mask].cpu().numpy()
@@ -1872,10 +1857,17 @@ class SpatiotemporalInference(pl.LightningModule):
             self.log(f"{split}_mae_mean_vi", residuals_vi.abs().mean().item(), sync_dist=True)
             self.log(f"{split}_rmse_mean_vi", torch.pow(residuals_vi, 2).mean().sqrt().item(), sync_dist=True)
 
+            residuals_vi = (target - mean[test_mask])
+            self.log(f"{split}_mae_mean_vi", residuals_vi.abs().mean().item(), sync_dist=True)
+            self.log(f"{split}_rmse_mean_vi", torch.pow(residuals_vi, 2).mean().sqrt().item(), sync_dist=True)
+
             target_np = target.cpu().numpy()
 
-            self.log(f"{split}_crps_mean", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
-            self.log(f"{split}_int_score_mean", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+            self.log(f"{split}_crps_mean", utils.crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+            self.log(f"{split}_int_score_mean", utils.int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+
+            self.log(f"{split}_crps_mean_vi", utils.crps_score(vi_mean_np, vi_std_np, target_np), sync_dist=True)
+            self.log(f"{split}_int_score_mean_vi", utils.int_score(vi_mean_np, vi_std_np, target_np), sync_dist=True)
 
             if self.true_post_std is not None:
                 target_std = self.true_post_std.reshape(-1)[test_mask]
@@ -1887,6 +1879,7 @@ class SpatiotemporalInference(pl.LightningModule):
                 self.log(f"{split}_mae_std_vi", residuals_std_vi.abs().mean().item(), sync_dist=True)
                 self.log(f"{split}_rmse_std_vi", torch.pow(residuals_std_vi, 2).mean().sqrt().item(), sync_dist=True)
 
+
     def predict_step(self, predict_mask, *args):
 
         if self.config.get('use_KS', False):
@@ -1895,11 +1888,6 @@ class SpatiotemporalInference(pl.LightningModule):
             return self.DGMRF_prediction(predict_mask.squeeze(0))
 
     def DGMRF_prediction(self, predict_mask):
-
-        #F_t = self.dgmrf.get_transition_matrix()
-        #print(f'transition matrix = {F_t}')
-        #svdvals = torch.linalg.svdvals(F_t)
-        #print(f'svd vals min = {svdvals.min()}, max = {svdvals.max()}')
         
         data_mask = torch.logical_and(self.mask, torch.logical_not(predict_mask))
 
@@ -1912,31 +1900,32 @@ class SpatiotemporalInference(pl.LightningModule):
         if not (hasattr(self, 'cg_mean') or hasattr(self, 'cg_std')):
             self.post_mean, self.post_std, niter = posterior_inference(self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                             data_mask, self.config, self.noise_var, self.vi_mean,
-                                                            features=self.features,
-                                                            preconditioner=None)
-                                                            #preconditioner=preconditioner2)
+                                                            features=self.features)
 
-        if not hasattr(self, 'cg_samples'):
+        if not hasattr(self, 'post_samples'):
             initial_guess = self.vi_mean
             self.post_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
-                                                 data_mask, self.config, self.noise_var, initial_guess, features=self.features,
-                                                 preconditioner=None)
-                                                 #preconditioner=self.vi_dist)
+                                                 data_mask, self.config, self.noise_var, initial_guess,
+                                                 features=self.features)
 
-            # if self.use_features:
-            #     post_samples_x = self.post_samples[:, :self.N]
-            #     post_samples_beta = self.post_samples[:, self.N:]
-            #     self.post_samples = post_samples_x + self.features @ post_samples_beta
+
+        if not hasattr(self, 'prior_samples'):
+            # prior sampling is the same as posterior sampling, but with all-zero observation mask
+            initial_guess = torch.zeros_like(self.vi_mean)
+            self.prior_samples = sample_posterior(10, self.dgmrf, torch.zeros(1, *self.input_shape),
+                                                 torch.zeros_like(data_mask), self.config, self.noise_var,
+                                                 initial_guess, features=self.features)
 
 
         results =  {'post_mean': self.post_mean.reshape(self.T, self.num_nodes),
-                'post_std': self.post_std.reshape(self.T, self.num_nodes),
-                'post_samples': self.post_samples.reshape(-1, self.T, self.num_nodes),
-                'vi_mean': self.vi_mean,
-                'vi_std':  self.vi_std,
-                'data': y_masked.reshape(self.T, self.num_nodes),
-                'gt': self.gt if hasattr(self, 'gt') else self.y_masked,
-                'predict_mask': predict_mask}
+                    'post_std': self.post_std.reshape(self.T, self.num_nodes),
+                    'post_samples': self.post_samples.reshape(-1, self.T, self.num_nodes),
+                    'prior_samples': self.prior_samples.reshape(-1, self.T, self.num_nodes),
+                    'vi_mean': self.vi_mean,
+                    'vi_std':  self.vi_std,
+                    'data': y_masked.reshape(self.T, self.num_nodes),
+                    'gt': self.gt if hasattr(self, 'gt') else self.y_masked,
+                    'predict_mask': predict_mask}
 
         if self.config.get('save_transition_matrix', False):
             print('save transition matrix')
@@ -1984,8 +1973,8 @@ class SpatiotemporalInference(pl.LightningModule):
         pred_std_np = self.post_std[test_mask].cpu().numpy()
         target_np = target.cpu().numpy()
 
-        self.log(f"{split}_crps", crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
-        self.log(f"{split}_int_score", int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_crps", utils.crps_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_int_score", utils.int_score(pred_mean_np, pred_std_np, target_np), sync_dist=True)
 
 
     def KS_prediction(self, predict_mask):
@@ -2301,25 +2290,50 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, initial_gu
 
 
 @torch.no_grad()
-def sample_prior(n_samples, dgmrf, data_shape, config, preconditioner=None):
+def sample_prior(n_samples, dgmrf, data_shape, config, features=None):
 
     bias = get_bias(dgmrf, data_shape)
     std_gauss = torch.randn(n_samples, data_shape[1], data_shape[2])
 
     rhs_sample = dgmrf(std_gauss - bias, transpose=True, with_bias=False) # G^T @ (z - b)
 
-    # if preconditioner is not None:
-    #     rhs_sample = preconditioner(rhs_sample, transpose=True)
+    if config["use_features"] and features is not None:
+        # Also sample coefficients
+        n_features = features.size(-1)
+        std_gauss_coeff = torch.randn(n_samples, n_features, 1)
+        rhs_sample_coeff = config["coeff_inv_std"] * std_gauss_coeff
 
-    # Solve using Conjugate gradient
-    samples = cg_solve(rhs_sample.reshape(1, -1), dgmrf, torch.ones(data_shape[1]*data_shape[2]), data_shape[1], config,
-            verbose=False, preconditioner=preconditioner)
+        rhs_sample = torch.cat((rhs_sample, rhs_sample_coeff.squeeze(-1)), dim=1)
 
-    # if preconditioner is not None:
-    #     samples = preconditioner(samples, transpose=False)
+    # # Solve using Conjugate gradient
+    # samples = cg_solve(rhs_sample.reshape(1, -1), dgmrf, torch.ones(data_shape[1]*data_shape[2]), data_shape[1], config,
+    #         verbose=False, preconditioner=preconditioner)
 
-    return samples
+    initial_guess = torch.zeros(rhs_sample.size())
+    res_norm = torch.ones(data_shape[0]) * float("inf")
+    rhs_norm = torch.linalg.norm(rhs_sample, dim=1)
+    k = 0
+    cg_niter = 0
+    regularizer = config.get('cg_regularizer', 0)
+    while (res_norm > config.get('outer_rtol', 1e-7) * rhs_norm).any() and (k < config.get('max_outer_iter', 100)):
+        samples, cg_info = cg_solve(rhs_sample, dgmrf, mask, data_shape[1], config,
+                                    noise_var=0, verbose=False, return_info=True,
+                                    initial_guess=initial_guess, features=features,
+                                    regularizer=regularizer)
 
+        k = k + 1
+        cg_niter += cg_info["niter"]
+        res_norm = cg_info["res_norm"]
+        print(f'relative residual norm after outer iteration {k} = {res_norm / rhs_norm}')
+        initial_guess = samples.squeeze(-1)
+        regularizer = 0.1 * regularizer
+
+    cg_info["niter"] = cg_niter
+
+    if return_info:
+        return samples, cg_info
+    else:
+        return samples
 
 
 @torch.no_grad()
@@ -2435,6 +2449,56 @@ def posterior_inference(dgmrf, data, mask, config, noise_var, initial_guess, fea
         return post_mean, post_std, time_per_iter, torch.tensor(niter_list, dtype=torch.float32).mean()
     else:
         return post_mean, post_std, mean_niter
+
+
+def setup_model(config, device='cpu'):
+    dataset_dict = utils.load_dataset(config["dataset"], config["data_dir"], device=device)
+    spatial_graph = dataset_dict["spatial_graph"]
+    temporal_graph = dataset_dict["temporal_graph"]
+
+    # make sure that edge normals have correct order
+    if config['dataset'].startswith('advection') or config['dataset'].startswith('spatiotemporal'):
+        normals = torch.stack([utils.get_normal(temporal_graph.pos[u], temporal_graph.pos[v],
+                                                max=np.sqrt(spatial_graph.num_nodes) - 1)
+                               for u, v in temporal_graph.edge_index.T], dim=0)
+        spatial_graph.edge_attr = normals
+        temporal_graph.edge_attr = normals
+
+    # load features and normalize them to zero mean and unit variance
+    if config.get('use_features', False) or config.get('use_features_dynamics', False):
+        features = dataset_dict["covariates"].to(torch.float32)
+        features = features - features.mean(0)
+        print('features std min', features.std(0).min())
+        features = features / features.std(0)
+        features = features[:, [0, 3, 4]]
+        print(f'use {features.size(1)} features')
+    else:
+        features = None
+
+    data = dataset_dict["data"].to(torch.float32)
+    joint_mask = dataset_dict["masks"].reshape(-1)  # shape [T * num_nodes]
+
+    N = dataset_dict["masks"].numel()
+    T = dataset_dict["masks"].size(0)
+
+    if not config.get('final', False):
+        # exclude all test data for training and validation runs
+        trainval_mask = torch.logical_not(dataset_dict["test_masks"].reshape(-1))
+        data = data[trainval_mask[joint_mask]]
+        joint_mask = torch.logical_and(joint_mask, trainval_mask)
+
+    initial_guess = torch.ones(N) * data.mean()
+
+    model = SpatiotemporalInference(config, initial_guess, data, joint_mask,
+                                    spatial_graph.to_dict(), temporal_graph.to_dict(),
+                                    T=T, gt=dataset_dict.get('gt', None),
+                                    data_mean=dataset_dict.get('data_mean', 0),
+                                    data_std=dataset_dict.get('data_std', 1),
+                                    features=features,
+                                    true_post_mean=dataset_dict.get("true_posterior_mean", None),
+                                    true_post_std=dataset_dict.get("true_posterior_std", None))
+
+    return model
 
 
 # @torch.no_grad()

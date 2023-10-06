@@ -1,0 +1,5 @@
+# @package datasource
+name: pems
+
+log_det_method: eigvals
+lattice: false
