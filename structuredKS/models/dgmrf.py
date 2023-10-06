@@ -2086,7 +2086,6 @@ def cg_solve(rhs, dgmrf, mask, T, config, noise_var=None, features=None,
     else:
         initial_guess = initial_guess.to(torch.float64)
 
-    print(rhs.size(), initial_guess.size())
     b = rhs + regularizer * initial_guess
 
     if noise_var is not None:
@@ -2242,6 +2241,7 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, initial_gu
 
     rhs_sample = rhs_sample1 + rhs_sample2
 
+    initial_guess = initial_guess.reshape(1, -1)
 
     if config["use_features"] and features is not None:
         # Change rhs to also sample coefficients
@@ -2259,7 +2259,7 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, initial_gu
         #                             noise_var=noise_var, verbose=False, return_info=True, features=features,
         #                             preconditioner=preconditioner)
         cg_features = features
-        if initial_guess.size(-1) < rhs_sample.size(-1):
+        if initial_guess.size(1) < rhs_sample.size(1):
             initial_guess = torch.cat([initial_guess, torch.zeros(1, n_features)], dim=1)
     else:
         cg_features = None
@@ -2292,6 +2292,7 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, initial_gu
         print(samples_x.size(), features.size(), samples_beta.size())
 
         samples = samples_x + features @ samples_beta
+        print(samples.size())
 
     if return_info:
         return samples, cg_info
@@ -2333,14 +2334,15 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess, verbose=
     mean_rhs = eta + masked_y / noise_var  # eta + H^T @ R^{-1} @ y
 
     mean_rhs = mean_rhs.reshape(data.size(0), -1)
+    initial_guess = initial_guess.reshape(mean_rhs.size())
 
     if config["use_features"] and features is not None:
         rhs_append = (features.transpose(0, 1) @ masked_y.reshape(-1, 1)) / noise_var
         mean_rhs = torch.cat([mean_rhs, rhs_append.view(1, -1).repeat(mean_rhs.size(0), 1)],
                              dim=1)  # shape [n_batch, T * num_nodes + n_features]
 
-        if initial_guess.size(-1) < mean_rhs.size(-1):
-            initial_guess = torch.cat([initial_guess, torch.zeros(1, features.size(-1))], dim=1)
+        if initial_guess.size(1) < mean_rhs.size(1):
+            initial_guess = torch.cat([initial_guess, torch.zeros(data.size(0), features.size(-1))], dim=1)
         cg_features = features
         #res_norm = torch.ones(data.size(0)) * float("inf")
         #rhs_norm = torch.linalg.norm(mean_rhs, dim=1)
@@ -2357,7 +2359,7 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess, verbose=
     else:
         cg_features = None
     
-    initial_guess = initial_guess.reshape(mean_rhs.size())
+    #initial_guess = initial_guess.reshape(mean_rhs.size())
     
     res_norm = torch.ones(data.size(0)) * float("inf")
     rhs_norm = torch.linalg.norm(mean_rhs, dim=1)
@@ -2386,6 +2388,8 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess, verbose=
         post_mean_beta = post_mean[mask.numel():]
 
         post_mean = post_mean_x + features @ post_mean_beta
+
+        print(f'beta = {post_mean_beta}')
     
     if return_info:
         return post_mean, cg_info
