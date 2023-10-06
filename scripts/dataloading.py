@@ -30,7 +30,7 @@ parser.add_argument("--advection", type=str, default='constant',
         help="Advection type")
 parser.add_argument("--n_transitions", type=int, default=4,
         help="number of transitions per time step in the state space model")
-parser.add_argument("--k_max", type=int, default=2,
+parser.add_argument("--k_max", type=int, default=3,
         help="number of terms to use to approximate matrix exponential")
 parser.add_argument("--block_mask", default=False, action='store_true', help="Use block mask instead of random mask")
 parser.add_argument("--data_split", type=list, default=0.9, help="fraction of data to use for training, "

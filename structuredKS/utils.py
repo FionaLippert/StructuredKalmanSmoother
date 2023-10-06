@@ -5,8 +5,10 @@ import scipy.linalg as spl
 import scipy.stats as sps
 import torch_geometric as ptg
 import os
+import os.path as osp
 import pickle
 import numpy as np
+import wandb
 
 def seed_all(seed):
     np.random.seed(seed)
@@ -37,6 +39,60 @@ def load_dataset(ds_name, ds_dir, device='auto'):
                     graphs[var_name] = graph.to(device)
 
     return graphs
+
+
+def get_wandb_model(run_path, return_config=False):
+    api = wandb.Api()
+
+    user, project, run_id = run_path.split('/')
+    model_path = osp.join(user, project, f'model-{run_id}:v0')
+    artifact = api.artifact(model_path, type='models')
+    model_path = osp.join(artifact.download(), 'model.pt')
+
+    if return_config:
+        config = api.run(run_path).config
+        return model_path, config
+    else:
+        return model_path
+
+def get_wandb_results(run_path):
+    api = wandb.Api()
+
+    user, project, run_id = run_path.split('/')
+    result_path = osp.join(user, project, f'results-{run_id}:v0')
+    artifact = api.artifact(result_path, type='results')
+    data_path = osp.join(artifact.download(), 'results.pickle')
+
+    with open(data_path, 'rb') as f:
+        results = pickle.load(f)
+
+    if isinstance(results, list):
+        return results[0]
+    else:
+        return results
+
+
+def get_runs(project_path):
+    api = wandb.Api()
+    runs = api.runs(project_path)
+
+    return runs
+
+
+def get_normal(u, v, max=None):
+    dx = v[0] - u[0]
+    dy = v[1] - u[1]
+
+    # take care of periodic boundaries
+    if abs(dx) == max:
+        dx = -dx
+    if abs(dy) == max:
+        dy = -dy
+
+    normal = torch.tensor([dx, dy])
+    norm = torch.pow(normal, 2).sum().sqrt()
+    normal = normal / norm
+    return normal
 
 
 def crps_score(pred_mean, pred_std, target):
@@ -72,21 +128,6 @@ def sample_GMRF(G, mean):
     dist = MultivariateNormal(loc=mean, precision_matrix=prec)
     x = dist.sample()
     return x, prec, dist.covariance_matrix
-
-def get_normal(u, v, max=None):
-    dx = v[0] - u[0]
-    dy = v[1] - u[1]
-
-    # take care of periodic boundaries
-    if abs(dx) == max:
-        dx = -dx
-    if abs(dy) == max:
-        dy = -dy
-
-    normal = torch.tensor([dx, dy])
-    norm = torch.pow(normal, 2).sum().sqrt()
-    normal = normal / norm
-    return normal
 
 
 def assemble_graph_t(latent_states, latent_pos, grid_size, data, mask,

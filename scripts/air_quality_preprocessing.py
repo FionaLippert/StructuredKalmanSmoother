@@ -6,7 +6,7 @@ import torch
 import torch_geometric as ptg
 import networkx as nx
 from matplotlib import pyplot as plt
-from matplotlib import cm, colormaps
+from matplotlib import cm, colormaps, patches
 from matplotlib.colors import Normalize
 import argparse
 
@@ -51,6 +51,7 @@ df_measurements = pd.read_csv(osp.join(dir, 'measurements.csv'))
 
 print(f'longitude: min = {df_sensors.longitude.min()}, max = {df_sensors.longitude.max()}')
 print(f'latitude: min = {df_sensors.latitude.min()}, max = {df_sensors.latitude.max()}')
+print(f'cutoff distance: {(args.max_dist / 1000):.2f} km')
 
 
 pos = np.stack([df_sensors.x.values, df_sensors.y.values]).T
@@ -234,7 +235,6 @@ all_covariates = all_covariates - all_covariates.min(0).values
 all_covariates = all_covariates / all_covariates.max(0).values
 all_covariates = all_covariates * 2 - 1 # scale to range (-1, 1)
 
-print(all_covariates.min(0), all_covariates.max(0))
 
 fig, ax = plt.subplots(figsize=(10, 10))
 colors = ['green' if all_masks[:, i].any() else 'red' for i in range(len(G_nx))]
@@ -297,6 +297,7 @@ if args.mask == 'spatial_block':
         print(f'length of time blocks = {block_size}')
         random_tidx = torch.randperm(T - block_size)
         starting_points = random_tidx[:args.t_blocks]
+        print(f't_blocks start at indices {starting_points}')
 
         tidx = []
         for s in starting_points:
@@ -319,12 +320,23 @@ if args.mask == 'spatial_block':
 
     # plot masked sensors on map
     fig, ax = plt.subplots(figsize=(10, 10))
-    colors = [(1, 0, 0, 0.7)] * G.num_nodes
+    c_train = (1, 0, 0, 0.7)
+    c_test = (0, 0, 1, 0.7)
+    c_train = (57/256, 170/256, 115/256, 0.7)
+    c_test = (128/256, 50/256, 116/256, 0.7)
+    colors = [c_train] * G.num_nodes
     for i in test_mask.nonzero().squeeze():
-        colors[i] = (0, 0, 1, 0.7)
-    nx.draw_networkx_nodes(G_nx, pos, node_size=10, node_color=colors, ax=ax, alpha=0.7)
-    nx.draw_networkx_edges(G_nx, pos, ax=ax, width=0.5, arrowsize=0.1)
-    fig.savefig(osp.join(dir, f'masked_sensors_ndummy={args.n_dummy_sensors}.png'), dpi=200)
+        colors[i] = c_test
+
+    nx.draw_networkx_edges(G_nx, pos, ax=ax, width=0.5, arrowsize=0.1, node_size=15)#min_source_margin=0, min_target_margin=0)
+    nx.draw_networkx_nodes(G_nx, pos, node_size=15, node_color=colors, ax=ax, alpha=0.9)
+
+    if args.mask == 'spatial_block':
+        ax.add_patch(patches.Rectangle((xmin, ymin), min(xmax, G.pos[:, 0].max()) - xmin,
+                                       min(ymax, G.pos[:, 1].max()) - ymin,
+                                       edgecolor='lightgray', fill=False, lw=2, ls='--'))
+    ax.axis('off')
+    fig.savefig(osp.join(dir, f'masked_sensors_ndummy={args.n_dummy_sensors}.png'), dpi=400)
 
 elif args.mask == 'all_spatial':
     # mask all nodes for a random set of time points

@@ -1,0 +1,18 @@
+# main config file for KS baseline
+output_dir: ${oc.env:HOME}/StructuredKalmanSmoother/results
+data_dir: ${oc.env:HOME}/StructuredKalmanSmoother/datasets
+dataset: advection_30x30_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_kmax=3_0
+experiment: test_KS
+
+# final model evaluation?
+final: true
+save_prediction: false
+
+noise_std: 0.01
+learn_noise_std: false
+use_KS: true
+EM_eps: 1e-3
+
+seed: 0
+n_iterations: 100
+device: gpu

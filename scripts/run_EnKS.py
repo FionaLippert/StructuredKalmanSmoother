@@ -68,8 +68,8 @@ def transition_matrix_exponential(coeffs, k_max=1):
 
 
 
-@hydra.main(config_path="conf", config_name="config")
-def run_baselines(config: DictConfig):
+@hydra.main(config_path="conf", config_name="config_EnKS")
+def run_EnKS(config: DictConfig):
 
     print(f'hydra working dir: {os.getcwd()}')
 
@@ -167,7 +167,7 @@ def run_baselines(config: DictConfig):
 
 
 
-    def adv_diff_transition(ensemble, transpose=False):
+    def adv_diff_transition(ensemble, n_transitions=4, transpose=False):
         v = ensemble[-2:, :]
         #diffusion = torch.nn.functional.relu(ensemble[-3, :])
         diffusion = torch.clamp(torch.pow(ensemble[-3, :], 2), min=0, max=0.5)
@@ -181,7 +181,7 @@ def run_baselines(config: DictConfig):
         for i in range(ensemble.size(-1)):
             # treat each ensemble member separately
 
-            for t in range(4):
+            for t in range(n_transitions):
                 ensemble[:-3, i] = advdiff.forward(ensemble[:-3, i], velocity=v[:, i],
                                                    diffusion=diffusion[i], transpose=transpose)
 
@@ -207,33 +207,31 @@ def run_baselines(config: DictConfig):
 
         return ensemble
 
+    if not config.get('estimate_params', False):
+        model = EnKS(config, data, joint_mask, dataset_dict['train_masks'].reshape(-1), true_transition,
+                     config.get('ensemble_size', 100),
+                      T=T, gt=dataset_dict.get('gt', None),
+                      true_post_mean=dataset_dict.get("true_posterior_mean", None),
+                      true_post_std=dataset_dict.get("true_posterior_std", None)
+                      )
+    else:
+        velocity = 2 * torch.rand(2, ) - 1
+        diff_param = torch.rand(1, ) * 0.2
 
-    # model = EnKS(config, data, joint_mask, dataset_dict['train_masks'].reshape(-1), true_transition,
-    #              config.get('ensemble_size', 100),
-    #               T=T, gt=dataset_dict.get('gt', None),
-    #               true_post_mean=dataset_dict.get("true_posterior_mean", None),
-    #               true_post_std=dataset_dict.get("true_posterior_std", None)
-    #               )
+        print(f'initial velocity estimate = {velocity}')
+        print(f'initial diffusion estimate = {torch.pow(diff_param, 2)}')
 
-    velocity = 2 * torch.rand(2, ) - 1
-    diff_param = torch.rand(1, ) * 0.2
+        # velocity = torch.tensor([-0.3, 0.3])
+        # diff_param = torch.tensor([0.1])
 
-    print(f'initial velocity estimate = {velocity}')
-    print(f'initial diffusion estimate = {torch.pow(diff_param, 2)}')
-
-    # velocity = torch.tensor([-0.3, 0.3])
-    # diff_param = torch.tensor([0.1])
-
-    model = EnKS(config, data, joint_mask, dataset_dict['train_masks'].reshape(-1), adv_diff_transition,
-                 config.get('ensemble_size', 100),
-                 initial_params=torch.cat([diff_param, velocity]),
-                 initial_std_params=torch.tensor([0.01, 0.1, 0.1]),
-                 T=T, gt=dataset_dict.get('gt', None),
-                 true_post_mean=dataset_dict.get("true_posterior_mean", None),
-                 true_post_std=dataset_dict.get("true_posterior_std", None)
-                 )
-
-
+        model = EnKS(config, data, joint_mask, dataset_dict['train_masks'].reshape(-1), adv_diff_transition,
+                     config.get('ensemble_size', 100),
+                     initial_params=torch.cat([diff_param, velocity]),
+                     initial_std_params=torch.tensor(config.get('initial_std_params', [0.01, 0.1, 0.1])),
+                     T=T, gt=dataset_dict.get('gt', None),
+                     true_post_mean=dataset_dict.get("true_posterior_mean", None),
+                     true_post_std=dataset_dict.get("true_posterior_std", None)
+                     )
 
 
     # dataloaders contain data masks defining which observations to use for training, validation, testing
@@ -280,4 +278,4 @@ def run_baselines(config: DictConfig):
 
 
 if __name__ == "__main__":
-    run_baselines()
+    run_EnKS()
