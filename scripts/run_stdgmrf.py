@@ -64,6 +64,7 @@ def run_dgmrf(config: DictConfig):
         config = wandb_config
 
     print(config)
+
     utils.seed_all(config['seed'])
 
     if not config['device'] == "cpu" and torch.cuda.is_available():
@@ -180,8 +181,8 @@ def run_dgmrf(config: DictConfig):
 
         #inference_callback = LatticeInferenceCallback(wandb_logger, config, dataset_dict['grid_size'],
         #                                              true_mean, true_std, residuals)
-    else:
-        tidx = T // 2
+    # else:
+    #     tidx = T // 2
 
         # val_nodes = dataset_dict['val_nodes'].cpu()
         # ridx = torch.randperm(len(val_nodes))[:4]
