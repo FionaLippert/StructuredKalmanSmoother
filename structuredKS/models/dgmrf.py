@@ -2477,6 +2477,12 @@ def setup_model(config, device='cpu'):
     N = dataset_dict["masks"].numel()
     T = dataset_dict["masks"].size(0)
 
+    if not config.get('final', False):
+        # exclude all test data for training and validation runs
+        trainval_mask = torch.logical_not(dataset_dict["test_masks"].reshape(-1))
+        data = data[trainval_mask[joint_mask]]
+        joint_mask = torch.logical_and(joint_mask, trainval_mask)
+
     initial_guess = torch.ones(N) * data.mean()
 
     model = SpatiotemporalInference(config, initial_guess, data, joint_mask,
