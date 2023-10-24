@@ -1,0 +1,24 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --gpus=1
+#SBATCH --job-name=train_eval
+#SBATCH --time=05:00:00
+#SBATCH --output=slurm_output_%A_%a.out
+
+source activate stdgmrf
+
+cd $HOME/StructuredKalmanSmoother/scripts
+
+which python
+
+nvidia-smi
+
+OVERRIDES=$1
+
+echo $OVERRIDES
+
+srun python analyse_layers_stdgmrf.py $OVERRIDES
