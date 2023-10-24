@@ -60,21 +60,26 @@ def analyse_stdgmrf(config: DictConfig):
     # load pre-trained model
     model.load_state_dict(torch.load(model_path))
 
+    model.eval()
+
     dir = osp.join(config['output_dir'], 'example_transformations', config['wandb_run'])
     os.makedirs(dir, exist_ok=True)
 
     # load posterior estimate
     results = utils.get_wandb_results(config['wandb_run'])
-    post_mean = results['post_mean'].reshape(1, model.T, model.num_nodes)
-    post_samples = results['post_samples'].reshape(-1, model.T, model.num_nodes)
+    post_mean = results['post_mean'].reshape(1, model.T, model.num_nodes).to(device)
+    post_samples = results['post_samples'].reshape(-1, model.T, model.num_nodes).to(device)
+    data = results['data'].reshape(-1, model.T, model.num_nodes).to(device)
 
     # apply temporal layers
     h_mean = model.dgmrf.apply_temporal(post_mean)
     h_samples = model.dgmrf.apply_temporal(post_samples)
+    h_data = model.dgmrf.apply_temporal(data)
 
     # apply spatial layers
     z_mean = model.dgmrf.apply_spatial(h_mean)
     z_samples = model.dgmrf.apply_spatial(h_samples)
+    z_data = model.dgmrf.apply_spatial(h_data)
 
     torch.save(post_mean, osp.join(dir, 'x_mean.pt'))
     torch.save(h_mean, osp.join(dir, 'h_mean.pt'))
@@ -83,6 +88,10 @@ def analyse_stdgmrf(config: DictConfig):
     torch.save(post_samples, osp.join(dir, 'x_samples.pt'))
     torch.save(h_samples, osp.join(dir, 'h_samples.pt'))
     torch.save(z_samples, osp.join(dir, 'z_samples.pt'))
+
+    torch.save(data, osp.join(dir, 'data.pt'))
+    torch.save(h_data, osp.join(dir, 'h_data.pt'))
+    torch.save(z_data, osp.join(dir, 'z_data.pt'))
 
 
 if __name__ == "__main__":
