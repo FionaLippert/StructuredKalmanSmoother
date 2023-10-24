@@ -1,0 +1,38 @@
+program: run_stdgmrf.py
+name: stdgmrf_sweep_with_features
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}
+  - learn_noise_std=true
+  - use_dynamics=true
+  - use_features=false
+  - use_features_dynamics=true
+  - vi_transition_type=diffusion
+  - independent_time=true
+  - final=true
+method: grid
+metric:
+  name: test_rmse
+  goal: minimize
+parameters:
+  seed:
+    values: [0, 1, 2, 3, 4]
+  n_layers:
+    values: [1, 2, 4]
+  transition_type:
+    values: ["GNN",
+             "diffusion"]
+  n_transitions:
+    values: [1, 2, 4]
+  n_layers_temporal:
+    values: [1, 2, 4]
+  use_vi_dynamics:
+    values: [ true, false ]
+  dataset:
+    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.62"',
+             '"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=all_temporal_0.9"',
+             '"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=forecasting_0.9"']
+
+
