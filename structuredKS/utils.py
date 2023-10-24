@@ -6,6 +6,7 @@ import scipy.stats as sps
 import torch_geometric as ptg
 import os
 import os.path as osp
+import json
 import pickle
 import numpy as np
 import wandb
@@ -39,6 +40,27 @@ def load_dataset(ds_name, ds_dir, device='auto'):
                     graphs[var_name] = graph.to(device)
 
     return graphs
+
+
+def save_graph(graph, name, dir_path):
+    graph_path = os.path.join(dir_path, "{}.pickle".format(name))
+    if not (isinstance(graph, list) or isinstance(graph, dict)):
+        graph = graph.to(torch.device("cpu"))
+    with open(graph_path, "wb") as graph_file:
+        pickle.dump(graph, graph_file)
+
+def save_dataset(save_dict, args, ds_name, ds_dir):
+    ds_dir_path = os.path.join(ds_dir, ds_name)
+    os.makedirs(ds_dir_path, exist_ok=True)
+
+    for name, graph in save_dict.items():
+        save_graph(graph, name, ds_dir_path)
+
+    json_string = json.dumps(vars(args), sort_keys=True, indent=4)
+    json_path = os.path.join(ds_dir_path, "description.json")
+    with open(json_path, "w") as json_file:
+        json_file.write(json_string)
+    return ds_dir_path
 
 
 def get_wandb_model(run_path, return_config=False):

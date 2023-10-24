@@ -11,7 +11,7 @@ from matplotlib.colors import Normalize
 import argparse
 
 from structuredKS import utils
-import utils_dgmrf
+import constants
 
 dir = '../datasets/AirQuality'
 # weather_vars = ['temperature', 'pressure', 'humidity', 'wind_speed', 'wind_direction']
@@ -444,4 +444,8 @@ obs_ratio = args.mask_size if args.mask == "spatial_block" else args.obs_ratio
 ds_name = f'AQ_{args.variable}_T={T}_{args.year}_{args.month}_log={args.log_transform}_norm={args.standardize}_' \
           f'mask={args.mask}_{obs_ratio}_tblocks={args.t_blocks}_ndummy={args.n_dummy_sensors}'
 print(f'Saving dataset {ds_name}')
-utils_dgmrf.save_graph_ds(data, args, ds_name)
+utils.save_dataset(data, args, ds_name, constants.DS_DIR)
+
+# save networkx graph
+nx.write_graphml(G_nx, osp.join(constants.DS_DIR, ds_name, 'spatial_graph.graphml'), infer_numeric_types=True)
+torch.save(pos, osp.join(constants.DS_DIR, ds_name, 'pos.pt'))

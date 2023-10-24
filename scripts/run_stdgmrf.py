@@ -60,6 +60,9 @@ def run_dgmrf(config: DictConfig):
         wandb_config['data_dir'] = config.data_dir
         wandb_config['output_dir'] = config.output_dir
         wandb_config['wandb_run'] = config.wandb_run
+        wandb_config['save_prediction'] = config.save_prediction
+        wandb_config['experiment'] = config.experiment
+        wandb_config['device'] = config.device
 
         config = wandb_config
 
@@ -236,7 +239,7 @@ def run_dgmrf(config: DictConfig):
         log_every_n_steps=1,
         logger=wandb_logger,
         deterministic=True,
-        accelerator='gpu',
+        accelerator='gpu' if device == 'cude' else 'cpu',
         devices=1,
         callbacks=callbacks,
         gradient_clip_val=config.get('gradient_clip_val', 0.0)
