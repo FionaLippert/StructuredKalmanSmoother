@@ -1,0 +1,20 @@
+program: run_KS.py
+name: KS_sweep
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}
+  - noise_std=0.01
+  - final=true
+  - EM_eps=0.005
+method: grid
+metric:
+  name: test_rmse
+  goal: minimize
+parameters:
+  seed:
+    values: [0, 1, 2, 3, 4]
+  dataset:
+    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.8_tblocks=10"']
+

@@ -1910,20 +1910,18 @@ class SpatiotemporalInference(pl.LightningModule):
                                                  features=self.features)
 
 
-        if False: #not hasattr(self, 'prior_samples'):
-            print('sample from prior')
-            # TODO: fix convergence of CG for prior sampling
-            # prior sampling is the same as posterior sampling, but with all-zero observation mask
-            initial_guess = torch.zeros_like(self.vi_mean)
-            self.prior_samples = sample_posterior(10, self.dgmrf, torch.zeros(1, *self.input_shape),
-                                                 torch.zeros_like(data_mask), self.config, self.noise_var,
-                                                 initial_guess, features=self.features)
+        # if not hasattr(self, 'prior_samples'):
+        #     # prior sampling is the same as posterior sampling, but with all-zero observation mask
+        #     initial_guess = torch.zeros_like(self.vi_mean)
+        #     self.prior_samples = sample_posterior(10, self.dgmrf, torch.zeros(1, *self.input_shape),
+        #                                          torch.zeros_like(data_mask), self.config, self.noise_var,
+        #                                          initial_guess, features=self.features)
 
 
         results =  {'post_mean': self.post_mean.reshape(self.T, self.num_nodes),
                     'post_std': self.post_std.reshape(self.T, self.num_nodes),
                     'post_samples': self.post_samples.reshape(-1, self.T, self.num_nodes),
-                    'prior_samples': self.prior_samples.reshape(-1, self.T, self.num_nodes),
+                    # 'prior_samples': self.prior_samples.reshape(-1, self.T, self.num_nodes),
                     'vi_mean': self.vi_mean,
                     'vi_std':  self.vi_std,
                     'data': y_masked.reshape(self.T, self.num_nodes),

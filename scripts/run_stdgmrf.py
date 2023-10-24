@@ -63,9 +63,7 @@ def run_dgmrf(config: DictConfig):
         # update wandb config with overrides
         overrides = HydraConfig.get().overrides.task
         print(overrides)
-        #test = OmegaConf.from_dotlist(overrides)
-        #print(test)
-
+        
         parser = OverridesParser.create()
         parsed_overrides = parser.parse_overrides(overrides=overrides)
 
@@ -73,7 +71,7 @@ def run_dgmrf(config: DictConfig):
             key = override.key_or_group
             value = override.value()
             wandb_config[key] = value
-
+        
         config = wandb_config
 
         config = OmegaConf.create(config)
@@ -251,7 +249,7 @@ def run_dgmrf(config: DictConfig):
         log_every_n_steps=1,
         logger=wandb_logger,
         deterministic=True,
-        accelerator='gpu',
+        accelerator='gpu' if device == 'cude' else 'cpu',
         devices=1,
         callbacks=callbacks,
         gradient_clip_val=config.get('gradient_clip_val', 0.0)

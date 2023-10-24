@@ -1,0 +1,26 @@
+program: run_ARIMA.py
+name: arima_sweep
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}
+  - final=False
+method: grid
+metric:
+  name: val_bic
+  goal: minimize
+parameters:
+  arima_params:
+    values: [[1, 0, 0],
+             [2, 0, 0],
+             [0, 0, 1],
+             [0, 0, 2],
+             [1, 0, 1],
+             [2, 0, 1],
+             [1, 0, 2],
+             [2, 0, 2]]
+  dataset:
+    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.8_tblocks=10"']
+
+

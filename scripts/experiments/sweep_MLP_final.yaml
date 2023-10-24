@@ -1,0 +1,23 @@
+program: run_MLP.py
+name: mlp_sweep_final
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}
+  - final=True
+  - early_stopping_patience=100
+  - MLP_nonlinearity="ReLU"
+  - MLP_hidden_dim=32
+  - lr=0.01
+method: grid
+metric:
+  name: val_rmse
+  goal: minimize
+parameters:
+  seed:
+    values: [0, 1, 2, 3, 4]
+  dataset:
+    values: ['"AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.8_tblocks=10"']
+
+
