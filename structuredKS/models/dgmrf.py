@@ -1846,7 +1846,7 @@ class SpatiotemporalInference(pl.LightningModule):
 
         vi_mean_np = self.vi_mean.flatten()[test_mask].cpu().numpy()
         vi_std_np = self.vi_std.flatten()[test_mask].cpu().numpy()
-        self.log(f"{split}_crps_vi", crps_score(vi_mean_np, vi_std_np, target_np), sync_dist=True)
+        self.log(f"{split}_crps_vi", utils.crps_score(vi_mean_np, vi_std_np, target_np), sync_dist=True)
 
         if self.true_post_mean is not None:
             target = self.true_post_mean.reshape(-1)[test_mask]
@@ -1902,14 +1902,17 @@ class SpatiotemporalInference(pl.LightningModule):
                                                             data_mask, self.config, self.noise_var, self.vi_mean,
                                                             features=self.features)
 
-        if not hasattr(self, 'post_samples'):
+        if True: #not hasattr(self, 'post_samples'):
+            print('sample from posterior')
             initial_guess = self.vi_mean
             self.post_samples = sample_posterior(10, self.dgmrf, y_masked.reshape(1, *self.input_shape),
                                                  data_mask, self.config, self.noise_var, initial_guess,
                                                  features=self.features)
 
 
-        if not hasattr(self, 'prior_samples'):
+        if False: #not hasattr(self, 'prior_samples'):
+            print('sample from prior')
+            # TODO: fix convergence of CG for prior sampling
             # prior sampling is the same as posterior sampling, but with all-zero observation mask
             initial_guess = torch.zeros_like(self.vi_mean)
             self.prior_samples = sample_posterior(10, self.dgmrf, torch.zeros(1, *self.input_shape),
@@ -2270,7 +2273,9 @@ def sample_posterior(n_samples, dgmrf, data, mask, config, noise_var, initial_gu
         res_norm = cg_info["res_norm"]
         print(f'relative residual norm after outer iteration {k} = {res_norm / rhs_norm}')
         initial_guess = samples.squeeze(-1)
-        regularizer = 0.1 * regularizer
+        
+        if k % 10 == 0:
+            regularizer = max(config.get('cg_gamma', 0.1) * regularizer, config.get('cg_min_regularizer', 1e-7))
 
     cg_info["niter"] = cg_niter
 
@@ -2392,7 +2397,9 @@ def posterior_mean(dgmrf, data, mask, config, noise_var, initial_guess, verbose=
         res_norm = cg_info["res_norm"]
         print(f'relative residual norm after outer iteration {k} = {res_norm / rhs_norm}')
         initial_guess = post_mean.squeeze(-1)
-        regularizer = 0.1 * regularizer
+        
+        if k % 10 == 0:
+            regularizer = max(config.get('cg_gamma', 0.1) * regularizer, config.get('cg_min_regualizer', 1e-7))
 
     post_mean = post_mean[0]
     cg_info["niter"] = cg_niter
