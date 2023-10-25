@@ -15,6 +15,16 @@ def seed_all(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+def str2numeric(s):
+    # try to convert string into int or float, otherwise return string
+    try:
+        return int(s)
+    except ValueError:
+        try:
+            return float(s)
+        except ValueError:
+            return s
+
 
 def load_dataset(ds_name, ds_dir, device='auto'):
     ds_dir_path = os.path.join(ds_dir, ds_name)

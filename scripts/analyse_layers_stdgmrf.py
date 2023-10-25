@@ -15,6 +15,8 @@ from torch.utils.data import DataLoader, random_split
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
 from omegaconf import DictConfig, OmegaConf
+from hydra.core.hydra_config import HydraConfig
+from hydra.core.override_parser.overrides_parser import OverridesParser
 import hydra
 import pickle
 
@@ -34,14 +36,35 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 def analyse_stdgmrf(config: DictConfig):
     assert 'wandb_run' in config
 
+    # load config of pre-trained model
     model_path, full_config = utils.get_wandb_model(config['wandb_run'], return_config=True)
 
+    # replace single quotes by double quotes
+    # wandb_config = eval(json.dumps(full_config['_content']))
     wandb_config = eval(full_config['config'].replace("'", '"'))
-    wandb_config['data_dir'] = config.data_dir
-    wandb_config['output_dir'] = config.output_dir
-    wandb_config['wandb_run'] = config.wandb_run
+
+    # for k, v in wandb_config.items():
+    #     if isinstance(v, list):
+    #         wandb_config[k] = [utils.str2numeric(vi) for vi in v]
+    #     else:
+    #         wandb_config[k] = utils.str2numeric(v)
+
+    # update wandb config with overrides
+    overrides = HydraConfig.get().overrides.task
+    print(overrides)
+
+    parser = OverridesParser.create()
+    parsed_overrides = parser.parse_overrides(overrides=overrides)
+
+    for override in parsed_overrides:
+        key = override.key_or_group
+        value = override.value()
+        wandb_config[key] = value
 
     config = wandb_config
+    config = OmegaConf.create(config)
+    print(config)
+
     utils.seed_all(config['seed'])
 
     if not config['device'] == "cpu" and torch.cuda.is_available():
