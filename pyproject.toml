@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 
 [project]
-name = "structuredKS"
-version = "0.0.1"
+name = "stdgmrf"
+version = "1.0.1"
 authors = [
   { name="Fiona Lippert" },
 ]
@@ -30,4 +30,4 @@ classifiers = [
 #addopts = "--cov --cov-report html --cov-report term-missing --cov-fail-under 95"
 #
 #[tool.coverage.run]
-#source = ["structuredKS"]
+#source = ["stdgmrf"]
