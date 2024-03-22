@@ -14,4 +14,21 @@ python -m build
 pip install .
 ```
 
-## Training and Testing
+## Training and inference
+To train an ST-DGMRF and perform inference, run
+```
+python scripts/run_stdgmrf.py dataset=<dataset-name>
+```
+This will use the default settings defined in `scripts/conf/config.yaml`. To change these settings, you can either adjust this file, or change them via the command line (will be parsed with [hydra](https://hydra.cc/docs/intro/)).
+
+## Experiments
+We use [Weights & Biases](https://wandb.ai/site) sweeps to perform our experiments.
+All relevant config files defining these sweeps can be found in [scripts/experiments](https://github.com/FionaLippert/StructuredKalmanSmoother/tree/main/scripts/experiments). To run an experiment, first initialize the sweep with
+```
+wandb sweep --project <propject-name> <path-to-config file>
+```
+and then, using the obtained `agent-ID`, run
+```
+wandb agent <agent-ID>
+```
+ 
