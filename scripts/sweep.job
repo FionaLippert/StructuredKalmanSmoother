@@ -8,8 +8,6 @@
 #SBATCH --job-name=sweep_job
 #SBATCH --time=12:00:00
 #SBATCH --output=slurm_output_%A_%a.out
-#SBATCH --mail-type=BEGIN,END
-#SBATCH --mail-user=f.lippert@uva.nl
 
 # run this file as "sbatch sweep.job sweep_id
 
