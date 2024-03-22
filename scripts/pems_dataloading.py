@@ -137,19 +137,9 @@ def insert_stations(G, coords, crs=3857):
                 print(f'ignore sensor idx {idx} with distance {cut_out[0]}')
 
     G = osmnx.project_graph(G, to_crs=4326)
-    # G = osmnx.get_undirected(G)
-
-    # Weights are inversely proportional to the length of the road
-    # lengths = nx.get_edge_attributes(G, 'length')
-    # lengths_list = list(lengths.values())
-    # # mean_length = np.mean(lengths_list)
-    # weights = {}
-    # for edge, length in lengths.items():
-    #     weights[edge] = 1. / length
-    # nx.set_edge_attributes(G, values=weights, name='weight')
 
     G_nx = nx.MultiDiGraph(G.edges())
-    # nx.set_edge_attributes(G_nx, values=weights, name='weight')
+
     for edge_attr in ['length', 'lanes', 'speed_kph', 'travel_time']:
         nx.set_edge_attributes(G_nx, values=nx.get_edge_attributes(G, edge_attr), name=edge_attr)
     for node_attr in ['x', 'y', 'lon', 'lat', 'street_count']:
@@ -229,39 +219,18 @@ def plot_graph(dir, G, vals, vertex_id, normalization, ax, fig, cax, vmin=None, 
     if plot_title is not None:
         ax.set_title(plot_title)
 
-    # nodes_to_label_set = set(nodes_to_label) #set(nodes_to_label.ravel().tolist())  # nodes_to_label is nodes with data
-    # print(G.nodes)
-    # print('----------------------')
-    # print(vertex_id_dict.keys())
-    # for node in G.nodes:
-    #     if node not in nodes_to_label_set:
-    #         x, y = G.nodes[node]['x'], G.nodes[node]['y']
-    #         if s < y and y < n and w < x and x < e:  # select points at the crossroads
-    #             val = vals[vertex_id_dict[node]]
-    #             ax.scatter(x, y, s=node_size, color=cmap(norm(val)), alpha=alpha)
-
-    # for node in nodes_to_label_set:
-    #     x, y = G.nodes[node]['x'], G.nodes[node]['y']
-    #     if s < y and y <n and w < x and x < e:  # select points at the crossroads
-    #         val = vals[vertex_id_dict[node]]
-    #         ax.scatter(x, y, s=node_size, color=cmap(norm(val)), alpha=alpha)
-    #         ax.scatter(x, y, s=3/20*node_size, color='white', alpha=alpha)
-
     # adding realworld map to the background
     ctx.add_basemap(ax=ax, crs='epsg:4326')
     ax.set_axis_off()
     if filename is not None:
         plt.savefig(osp.join(dir, f'{filename}.png'), dpi=500)
 
-    # fig, ax = plt.subplots(1, 1)
 
     if cut_colormap:
         cbar = fig.colorbar(cm.ScalarMappable(norm, cmap), orientation='vertical', extend='max', cax=cax)
-        # cbar.ax.tick_params(labelsize=10)
     else:
         cbar = fig.colorbar(cm.ScalarMappable(norm, cmap), orientation='vertical', cax=cax)
-        # cbar.ax.tick_params(labelsize=10)
-    # ax.axis('off')
+
     if filename is not None:
         plt.savefig(osp.join(dir, f'colorbar_{filename}.png'), dpi=500, transparent=True)
 

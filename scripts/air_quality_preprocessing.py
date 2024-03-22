@@ -10,13 +10,12 @@ from matplotlib import cm, colormaps, patches
 from matplotlib.colors import Normalize
 import argparse
 
-from structuredKS import utils
+from stdgmrf import utils
 import constants
 
 dir = '../datasets/AirQuality'
-# weather_vars = ['temperature', 'pressure', 'humidity', 'wind_speed', 'wind_direction']
-# weather_vars = ['t2m', 'sp', 'tp', 'u10', 'v10']
-weather_vars = ['t2m', 'rh', 'sp', 'u10', 'v10', 'solarpos', 'solarpos_dt'] #, 'dayofyear']
+
+weather_vars = ['t2m', 'rh', 'sp', 'u10', 'v10', 'solarpos', 'solarpos_dt']
 
 parser = argparse.ArgumentParser(description='Generate AirQuality dataset')
 
@@ -100,29 +99,12 @@ if args.mask == 'spatial_block':
 # time processing
 df_measurements['timestamp'] = pd.to_datetime(df_measurements['time'])
 df_measurements.set_index('timestamp', inplace=True)
-# df_meteo['timestamp'] = pd.to_datetime(df_meteo['time'])
-# df_meteo.set_index('timestamp', inplace=True)
-
 
 # filter time
 df_sub = df_measurements[df_measurements.index.year == args.year]
 df_sub = df_sub[df_sub.index.month == args.month]
-# df_meteo = df_meteo[df_meteo.index.year == args.year]
-# df_meteo = df_meteo[df_meteo.index.month == args.month]
 
 df_covariates.set_index('timestamp', inplace=True)
-
-# df_covariates = df_covariates[df_covariates.index.year == args.year]
-# df_covariates = df_meteo[df_covariates.index.month == args.month]
-
-# # interpolate meteorology to missing time points
-# df_meteo.drop('time', inplace=True, axis=1)
-# df_meteo.drop('weather', inplace=True, axis=1)
-# df_meteo = df_meteo.groupby('id')[weather_vars]
-# df_meteo = df_meteo.resample('1H').mean()
-# df_meteo = df_meteo.interpolate().reset_index()
-#
-# print(df_meteo.head())
 
 
 nodes = torch.arange(G.num_nodes)
@@ -147,10 +129,7 @@ n_masked = 0
 variable = f'{args.variable}_Concentration'
 df_sub[variable] = df_sub[variable].replace(0, np.nan)
 
-# fig, ax = plt.subplots(1, (tidx_end-tidx_start).item()+1, figsize=(2*(tidx_end-tidx_start).item()+1, 2))
 G_nx = ptg.utils.convert.to_networkx(G)
-# cmap = colormaps.get_cmap('viridis')
-# norm = Normalize(vmin=df_sub[variable].min(), vmax=df_sub[variable].max())
 
 fig, ax = plt.subplots(figsize=(10, 10))
 test_color = '#0099cc'
@@ -168,50 +147,16 @@ for tidx, (ts, df_t) in enumerate(df_sub.groupby('timestamp', sort=True)):
         df_t = df_t[['node_idx', variable]].dropna().sort_values('node_idx')
         mask = torch.isin(nodes, torch.tensor(df_t.node_idx.values), assume_unique=True)
 
-        # print(ts)
-
-        # df_weather = df_meteo.query(f'timestamp == "{ts}"')
         df_weather = df_covariates.query(f'timestamp == "{ts}"')
-        # print(df_weather)
-        # print(df_weather.id.nunique(), df_sensors.district_id.nunique())
-        # print(torch.isin(torch.tensor(df_sensors.district_id.unique()), torch.tensor(df_weather.id.unique())))
-        # df_weather = pd.merge(df_sensors, df_weather, how='left', left_on='district_id', right_on='id')
-        # print(df_weather.head())
-        # if len(df_weather) != len(nodes):
-        #     print(len(df_weather), len(nodes))
-        #     print(torch.logical_not(torch.isin(nodes, torch.tensor(df_weather.node_idx.values))).nonzero().flatten())
 
         data = torch.tensor(df_t[variable].values)
-        # print(tidx, data.min())
+
         covariates = torch.tensor(df_weather.sort_values('node_idx')[weather_vars].values) # shape [num_nodes, n_vars]
-        # print(covariates.min(), covariates.max())
+
         all_data.append(data)
         all_masks.append(mask)
         timestamps.append(ts)
         all_covariates.append(covariates)
-
-        # if args.mask == 'spatial_block':
-        #
-        #     # apply mask for 20% of the time steps
-        #     if ((tidx - tidx_start) > 0.2 * T) and ((tidx - tidx_start) < 0.7 * T):
-        #         # use masked out area for testing
-        #         # all_test_indices.append(torch.logical_and(mask, test_mask)[mask].nonzero().squeeze(-1) + n_masked)
-        #         # use the rest of the observed nodes for training and validation
-        #         all_test_masks.append(torch.logical_and(mask, test_mask))
-        #         # all_trainval_indices.append(torch.logical_and(mask, torch.logical_not(test_mask))[mask].nonzero().squeeze(-1)
-        #         #                             + n_masked)
-        #         all_val_masks.append(torch.logical_and(mask, val_mask))
-        #         all_train_masks.append(torch.logical_and(mask, torch.logical_not(test_mask + val_mask)))
-        #     else:
-        #         # use all observed nodes for training and validation
-        #         # all_trainval_indices.append(torch.arange(mask.sum()) + n_masked)
-        #         all_train_masks.append(mask)
-        #
-        #         all_test_masks.append(torch.zeros_like(mask))
-        #         all_val_masks.append(torch.zeros_like(mask))
-        #
-        #     n_masked += mask.sum()
-
 
 
 all_data = torch.cat(all_data, dim=0)
@@ -286,9 +231,6 @@ all_data = states[joint_mask]
 
 
 if args.mask == 'spatial_block':
-    # all_test_masks = torch.stack(all_test_masks, dim=0)
-    # all_train_masks = torch.stack(all_train_masks, dim=0)
-    # all_val_masks = torch.stack(all_val_masks, dim=0)
 
     if args.t_blocks == 1:
         tidx = torch.arange(torch.ceil(0.2 * T), torch.ceil(0.7 * T), dtype=torch.long)
@@ -303,10 +245,6 @@ if args.mask == 'spatial_block':
         for s in starting_points:
             tidx.append(torch.arange(s, s + block_size, dtype=torch.long))
         tidx = torch.cat(tidx)
-
-        # tidx1 = torch.arange(torch.ceil(0.2 * T), torch.ceil(0.4 * T), dtype=torch.long)
-        # tidx2 = torch.arange(torch.ceil(0.6 * T), torch.ceil(0.8 * T), dtype=torch.long)
-        # tidx = torch.cat([tidx1, tidx2])
 
     all_test_masks = torch.zeros_like(all_masks)
     all_test_masks[tidx, :] = test_mask.view(1, -1).repeat(tidx.size(0), 1)
@@ -332,6 +270,9 @@ if args.mask == 'spatial_block':
     nx.draw_networkx_nodes(G_nx, pos, node_size=15, node_color=colors, ax=ax, alpha=0.9)
 
     if args.mask == 'spatial_block':
+        print('rectangle properties:')
+        print((xmin, ymin), min(xmax, G.pos[:, 0].max()) - xmin,
+                                       min(ymax, G.pos[:, 1].max()) - ymin)
         ax.add_patch(patches.Rectangle((xmin, ymin), min(xmax, G.pos[:, 0].max()) - xmin,
                                        min(ymax, G.pos[:, 1].max()) - ymin,
                                        edgecolor='lightgray', fill=False, lw=2, ls='--'))
@@ -431,9 +372,6 @@ data = {
     "val_masks": torch.logical_and(joint_mask.view(T, -1), all_val_masks),
     "covariates": all_covariates,
     "data_mean_and_std": torch.tensor([data_mean, data_std])
-    # "train_idx": train_idx,
-    # "val_idx": val_idx,
-    # "test_idx": test_idx
     }
 
 obs_ratio = args.mask_size if args.mask == "spatial_block" else args.obs_ratio

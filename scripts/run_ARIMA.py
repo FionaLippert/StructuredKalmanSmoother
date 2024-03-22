@@ -18,10 +18,10 @@ import hydra
 import pickle
 
 # import visualization as vis
-from structuredKS.models.baselines import *
+from stdgmrf.models.baselines import *
 import constants_dgmrf as constants
 import utils_dgmrf as utils
-from structuredKS.datasets.dummy_dataset import DummyDataset
+from stdgmrf.datasets.dummy_dataset import DummyDataset
 from callbacks import *
 
 def seed_all(seed):

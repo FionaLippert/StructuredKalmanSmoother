@@ -20,12 +20,10 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 import hydra
 import pickle
 
-# import visualization as vis
-from structuredKS.models.dgmrf import *
+from stdgmrf.models.dgmrf import *
 import constants_dgmrf as constants
-# import utils_dgmrf as utils
-from structuredKS import utils
-from structuredKS.datasets.dummy_dataset import DummyDataset
+from stdgmrf import utils
+from stdgmrf.datasets.dummy_dataset import DummyDataset
 from callbacks import *
 
 
@@ -40,14 +38,7 @@ def analyse_stdgmrf(config: DictConfig):
     model_path, full_config = utils.get_wandb_model(config['wandb_run'], return_config=True)
 
     # replace single quotes by double quotes
-    # wandb_config = eval(json.dumps(full_config['_content']))
     wandb_config = eval(full_config['config'].replace("'", '"'))
-
-    # for k, v in wandb_config.items():
-    #     if isinstance(v, list):
-    #         wandb_config[k] = [utils.str2numeric(vi) for vi in v]
-    #     else:
-    #         wandb_config[k] = utils.str2numeric(v)
 
     # update wandb config with overrides
     overrides = HydraConfig.get().overrides.task

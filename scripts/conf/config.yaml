@@ -3,7 +3,7 @@ output_dir: ${oc.env:HOME}/StructuredKalmanSmoother/results
 data_dir: ${oc.env:HOME}/StructuredKalmanSmoother/datasets
 dataset: AQ_PM25_T=400_2015_3_log=True_norm=True_mask=spatial_block_0.8_tblocks=10
 #dataset: advection_30x30_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_kmax=3_0
-experiment: test_snellius
+experiment: test
 
 # final model evaluation?
 final: true
@@ -26,11 +26,6 @@ coeff_inv_std: 0.0001
 independent_time: false
 weighted_dgmrf: false
 weighted_vi: false
-
-## DGMRF settings
-#use_dynamics: false
-#transition_type: none
-#n_transitions: 0
 
 # ST-DGMRF settings
 use_dynamics: true

@@ -19,26 +19,11 @@ cd $HOME/StructuredKalmanSmoother/scripts
 
 which python
 
-# cp -r $HOME/StructuredKalmanSmoother/datasets/ $TMPDIR
-
-#OUTDIR=$TMPDIR/results
-#mkdir -p $OUTDIR
-
 nvidia-smi
 
 OVERRIDES=$1
 
 echo $OVERRIDES
 
-# don't sync while running on compute nodes
-#export WANDB_MODE="offline"
-#export WANDB_DIR=$TMPDIR
-
-#srun python test_spdgmrf.py output_dir=$OUTDIR $OVERRIDES
 srun python run_MLP.py $OVERRIDES
 
-# sync after completion
-#wandb sync --include-offline $WANDB_DIR/wandb/offline-*
-
-#mkdir -p $HOME/StructuredKalmanSmoother/slurm_outputs
-#cp -r $OUTDIR $HOME/StructuredKalmanSmoother/slurm_outputs

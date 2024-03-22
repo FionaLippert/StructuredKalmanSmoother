@@ -18,12 +18,10 @@ from omegaconf import DictConfig, OmegaConf
 import hydra
 import pickle
 
-# import visualization as vis
-from structuredKS.models.dgmrf import *
+from stdgmrf.models.dgmrf import *
 import constants_dgmrf as constants
-# import utils_dgmrf as utils
-from structuredKS import utils
-from structuredKS.datasets.dummy_dataset import DummyDataset
+from stdgmrf import utils
+from stdgmrf.datasets.dummy_dataset import DummyDataset
 from callbacks import *
 
 def seed_all(seed):

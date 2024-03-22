@@ -4,8 +4,8 @@ import os.path as osp
 import argparse
 from pvlib import solarposition
 
-# from structuredKS import utils
-from structuredKS.datasets import era5
+# from stdgmrf import utils
+from stdgmrf.datasets import era5
 # import utils_dgmrf
 
 dir = '../datasets/AirQuality'

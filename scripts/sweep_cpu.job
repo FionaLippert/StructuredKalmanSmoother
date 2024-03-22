@@ -18,19 +18,8 @@ cd $HOME/StructuredKalmanSmoother/scripts
 
 which python
 
-#OUTDIR=$TMPDIR/results
-#mkdir -p $OUTDIR
-
 nvidia-smi
 
-# don't sync while running on compute nodes
-#export WANDB_MODE="offline"
 export WANDB_DIR=$HOME/StructuredKalmanSmoother
 
 wandb agent $1
-
-# sync after completion
-#wandb sync --include-offline $WANDB_DIR/wandb/offline-*
-
-#mkdir -p $HOME/StructuredKalmanSmoother/slurm_outputs
-#cp -r $OUTDIR $HOME/StructuredKalmanSmoother/slurm_outputs

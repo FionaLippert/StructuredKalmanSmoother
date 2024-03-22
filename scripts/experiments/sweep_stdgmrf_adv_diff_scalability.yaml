@@ -1,0 +1,44 @@
+program: run_stdgmrf.py
+name: stdgmrf_sweep_adv_diff_scalability
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}
+  - noise_std=0.01
+  - n_iterations=1000
+  - use_dynamics=true
+  - use_features_dynamics=false
+  - use_bias=false
+  - use_dynamics_bias=false
+  - transition_type=advection+diffusion
+  - vi_transition_type=diffusion
+  - independent_time=false
+  - final=true
+  - weighted_dgmrf=false
+  - GNN_hidden_dim=10
+  - max_cg_iter=500
+  - max_outer_iter=1
+  - cg_regularizer=0
+  - +gradient_clip_val=0.5
+method: grid
+metric:
+  name: test_rmse
+  goal: minimize
+parameters:
+  seed:
+    values: [0, 1, 2, 3, 4]
+  n_layers:
+    values: [2]
+  n_transitions:
+    values: [2]
+  n_layers_temporal:
+    values: [1]
+  use_vi_dynamics:
+    values: [ true ]
+  use_KS:
+    values: [ true, false ]
+  dataset:
+    values: ['"advection_30x30_obs=0.9_T=20_diff=0.01_adv=constant_ntrans=4_1block=True_kmax=3_0"']
+
+

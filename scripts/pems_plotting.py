@@ -37,13 +37,10 @@ def plot_nodes(dir, G, pos, values, indices, fig, ax, cax=None, vmin=None, vmax=
     if plot_title is not None:
         ax.set_title(plot_title)
 
-    # adding realworld map to the background
-    # ctx.add_basemap(ax=ax, crs='epsg:4326')
     ax.set_axis_off()
 
     if cax is not None:
         cbar = fig.colorbar(cm.ScalarMappable(norm, cmap), orientation='vertical', cax=cax)
-            # cbar.ax.tick_params(labelsize=10)
 
     if filename is not None:
         plt.savefig(osp.join(dir, f'{filename}.png'), dpi=500)#, transparent=True)

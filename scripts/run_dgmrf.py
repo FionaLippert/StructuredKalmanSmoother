@@ -9,7 +9,7 @@ import copy
 from matplotlib import pyplot as plt
 
 # import visualization as vis
-from structuredKS.models.dgmrf import DGMRF, VariationalDist, vi_loss, posterior_inference
+from stdgmrf.models.dgmrf import DGMRF, VariationalDist, vi_loss, posterior_inference
 import constants_dgmrf as constants
 import utils_dgmrf as utils
 # import inference

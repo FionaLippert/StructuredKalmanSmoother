@@ -1,6 +1,6 @@
 # Replacing String with another string
 import torch
-from structuredKS.models import layers, dgmrf
+from stdgmrf.models import dgmrf, transition_models
 import torch_geometric as tg
 import pytest
 
@@ -10,7 +10,7 @@ torch.manual_seed(0)
 def diagonal_transition():
     F = torch.diag(torch.rand(5))
     sparse_pattern = F.to_sparse_coo().coalesce()
-    G = layers.StaticTransition(sparse_pattern.indices(), initial_weights=sparse_pattern.values())
+    G = transition_models.StaticTransition(sparse_pattern.indices(), initial_weights=sparse_pattern.values())
 
     return F, G
 

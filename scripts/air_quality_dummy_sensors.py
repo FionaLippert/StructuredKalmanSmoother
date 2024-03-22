@@ -1,15 +1,10 @@
 import numpy as np
 import pandas as pd
 import os.path as osp
-# import torch
-# import torch_geometric as ptg
-# import networkx as nx
 import geopandas as gpd
 import pyproj
 from matplotlib import pyplot as plt
 import argparse
-# import contextily as cx
-
 
 parser = argparse.ArgumentParser(description='Add dummy sensors to AirQuality dataset')
 

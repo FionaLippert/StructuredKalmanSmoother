@@ -20,3 +20,14 @@ classifiers = [
 
 [project.urls]
 "Homepage" = "https://github.com/FionaLippert/StructuredKalmanSmoother"
+
+#[project.optional-dependencies]
+#test = [
+#    "pytest-cov ~=3.0.0",
+#]
+#
+#[tool.pytest.ini_options]
+#addopts = "--cov --cov-report html --cov-report term-missing --cov-fail-under 95"
+#
+#[tool.coverage.run]
+#source = ["structuredKS"]

@@ -18,12 +18,12 @@ import hydra
 import pickle
 
 # import visualization as vis
-from structuredKS.models.baselines import *
-from structuredKS.models.KS import AdvectionDiffusionTransition
+from stdgmrf.models.baselines import *
+from stdgmrf.models.KS import AdvectionDiffusionTransition
 import constants_dgmrf as constants
-import structuredKS.utils as utils_stdgmrf
+import stdgmrf.utils as utils_stdgmrf
 import utils_dgmrf as utils
-from structuredKS.datasets.dummy_dataset import DummyDataset
+from stdgmrf.datasets.dummy_dataset import DummyDataset
 from callbacks import *
 
 def seed_all(seed):
@@ -156,12 +156,6 @@ def run_EnKS(config: DictConfig):
             ensemble = F @ ensemble.to(torch.float64)
 
         ensemble = ensemble.to(torch.float64)
-        #
-        # for i in range(ensemble.size(-1)):
-        #     for t in range(4):
-        #         ensemble[:-3, i] = advdiff.forward(ensemble[:-3, i], velocity=torch.tensor([-0.3, 0.3]),
-        #                                            diffusion=torch.tensor([0.01]), transpose=transpose)
-
 
         return ensemble
 
@@ -185,26 +179,6 @@ def run_EnKS(config: DictConfig):
                 ensemble[:-3, i] = advdiff.forward(ensemble[:-3, i], velocity=v[:, i],
                                                    diffusion=diffusion[i], transpose=transpose)
 
-            # edge_velocities = (normals * v[:, i].unsqueeze(0)).sum(-1)  # [num_edges]
-            # edge_velocities = ptg.utils.to_dense_adj(G_temp.edge_index, edge_attr=edge_velocities,
-            #                                          max_num_nodes=num_nodes).squeeze(0)  # [num_nodes, num_nodes]
-            #
-            # F_coeffs = torch.zeros(num_nodes, num_nodes)
-            # F_coeffs += diffusion_coeffs(adj, diffusion[i])
-            # F_coeffs += advection_coeffs(edge_velocities)
-            #
-            # F = transition_matrix_exponential(F_coeffs.to(torch.float64), k_max=1)
-            # F = torch.linalg.matrix_power(F, n_transitions)
-            #
-            # # F = dataset_dict['true_transition_matrix'].to(torch.float64)
-            #
-            # if transpose:
-            #     ensemble[:-3, i] = (F.transpose(0, 1) @ ensemble[:-3, i].unsqueeze(-1)).squeeze(-1)
-            # else:
-            #     ensemble[:-3, i] = (F @ ensemble[:-3, i].unsqueeze(-1)).squeeze(-1)
-
-
-
         return ensemble
 
     if not config.get('estimate_params', False):
@@ -220,9 +194,6 @@ def run_EnKS(config: DictConfig):
 
         print(f'initial velocity estimate = {velocity}')
         print(f'initial diffusion estimate = {torch.pow(diff_param, 2)}')
-
-        # velocity = torch.tensor([-0.3, 0.3])
-        # diff_param = torch.tensor([0.1])
 
         model = EnKS(config, data, joint_mask, dataset_dict['train_masks'].reshape(-1), adv_diff_transition,
                      config.get('ensemble_size', 100),

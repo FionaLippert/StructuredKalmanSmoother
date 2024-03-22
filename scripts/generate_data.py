@@ -1,15 +1,9 @@
-from structuredKS.datasets import linear
-from structuredKS.models.KS import KalmanSmoother, JointKalmanSmoother, KSMLE
-from structuredKS import utils
+from stdgmrf.datasets import linear
+from stdgmrf.models.KS import KalmanSmoother, JointKalmanSmoother, KSMLE
+from stdgmrf import utils
 import torch
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
-
-
-
-# torch.cuda.set_device(0)
-# torch.cuda.manual_seed_all(42)
-
 
 
 config = {
@@ -26,7 +20,7 @@ config = {
     'initial_scale': 10
 }
 
-linear_ds = linear.LinearTransport(config)#, load_data_from='../data')
+linear_ds = linear.LinearTransport(config)
 linear_ds.save('../data')
 
 # test Kalman smoother
@@ -42,16 +36,6 @@ mean, cov, cov_lagged = ks.smoother(linear_ds.observations)
 torch.save(mean, '../data/smoothed_mean.pt')
 torch.save(cov, '../data/smoothed_cov.pt')
 
-#
-# ks.F = torch.eye(ks.state_dim, ks.state_dim).unsqueeze(0).repeat(ks.batch_dim, 1, 1)
-# #ks.F = torch.zeros(ks.state_dim, ks.state_dim).unsqueeze(0).repeat(ks.batch_dim, 1, 1)
-# ks.EM(linear_ds.observations, 10, update='F')
-#
-# mean, cov, cov_lagged = ks.smoother(linear_ds.observations)
-# torch.save(mean, '../data/smoothed_mean_EM.pt')
-# torch.save(cov, '../data/smoothed_cov_EM.pt')
-
-##################################################################
 
 
 A = linear_ds.transition_model[0]
@@ -113,12 +97,4 @@ updated_mean = (updated_cov @ updated_eta.unsqueeze(-1)).squeeze(-1)
 torch.save(updated_mean, '../data/smoothed_joint_mean_MLE.pt')
 torch.save(updated_cov, '../data/smoothed_joint_cov_MLE.pt')
 
-print(linear_ds.transition_model[0])
-print(model.transition.to_dense())
-
-# joint_mean, joint_omega, joint_cov, joint_mean_new, joint_omega_new, joint_cov_new = trainer.test(model, dl)
-# torch.save(joint_mean_new, '../data/smoothed_mean_mle.pt')
-# torch.save(joint_cov_new, '../data/smoothed_cov_mle.pt')
-# torch.save(joint_mean, '../data/prior_mean_mle.pt')
-# torch.save(joint_cov, '../data/prior_cov_mle.pt')
 
